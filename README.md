@@ -67,6 +67,10 @@ wget https://polybox.ethz.ch/index.php/s/JAJpZb2RJAjd4Y5/download/data.zip
 unzip data.zip
 ```
 
+The sequence we provide here is derived from the [Waymo Open Dataset](https://waymo.com/open/). To avoid copyright issues, we only ship this single sequence as an example, for other sequences, please download them directly from [https://waymo.com/open/](https://waymo.com/open/).
+
+In addition, Multi-Camera Airsim (MC-Airsim) Dataset is available from [https://zhihao-ethz.github.io/mcgs-slam-dataset/](https://zhihao-ethz.github.io/mcgs-slam-dataset/).
+
 ---
 
 ## 🚀 Run MCGS-SLAM
