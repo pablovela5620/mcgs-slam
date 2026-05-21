@@ -1,10 +1,10 @@
-<h2 align="center"> <a href="https://zhihao-ethz.github.io/mcgs-slam">MCGS-SLAM: A Multi-Camera SLAM Framework Using Gaussian Splatting for High-Fidelity Mapping</a>
+<h2 align="center"> <a href="https://mcgs-slam.github.io">MCGS-SLAM: A Multi-Camera SLAM Framework Using Gaussian Splatting for High-Fidelity Mapping</a>
 </h2>
 
 <h5 align="center">
 
 [![arXiv](https://img.shields.io/badge/Arxiv-2509.14191-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2509.14191) 
-[![Home Page](https://img.shields.io/badge/Project-Website-33728E.svg)](https://zhihao-ethz.github.io/mcgs-slam) 
+[![Home Page](https://img.shields.io/badge/Project-Website-33728E.svg)](https://mcgs-slam.github.io) 
 [![ICRA 2026](https://img.shields.io/badge/ICRA-2026-e28353.svg)](https://2026.ieee-icra.org) 
 
 Zhihao Cao, Hanyu Wu, Li Wa Tang, Zizhou Luo, Wei Zhang, Marc Pollefeys, Zihan Zhu*, Martin R. Oswald
@@ -53,7 +53,7 @@ pip install -U openmim
 mim install mmengine mmcv
 ```
 
-Install DROID and MCBA:
+Install DROID (CUDA), JDSA (CUDA) and MCBA (CUDA):
 ```bash
 export CC=gcc-11
 export CXX=g++-11
@@ -71,7 +71,7 @@ unzip data.zip
 
 The sequence we provide here is derived from the [Waymo Open Dataset](https://waymo.com/open/). To avoid copyright issues, we only ship this single sequence as an example, for other sequences, please download them directly from [https://waymo.com/open/](https://waymo.com/open/).
 
-In addition, Multi-Camera Airsim (MC-Airsim) Dataset is available from [https://zhihao-ethz.github.io/mcgs-slam-dataset/](https://zhihao-ethz.github.io/mcgs-slam-dataset/).
+In addition, Multi-Camera Airsim (MC-Airsim) Dataset is available from [https://mcgs-slam.github.io/dataset/](https://mcgs-slam.github.io/dataset/).
 
 ---
 
