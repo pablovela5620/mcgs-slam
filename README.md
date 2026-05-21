@@ -7,7 +7,9 @@
 [![Home Page](https://img.shields.io/badge/Project-Website-33728E.svg)](https://zhihao-ethz.github.io/mcgs-slam) 
 [![ICRA 2026](https://img.shields.io/badge/ICRA-2026-e28353.svg)](https://2026.ieee-icra.org) 
 
-Zhihao Cao, Hanyu Wu, Li Wa Tang, Zizhou Luo, Wei Zhang, Marc Pollefeys, Zihan Zhu, Martin R. Oswald
+Zhihao Cao, Hanyu Wu, Li Wa Tang, Zizhou Luo, Wei Zhang, Marc Pollefeys, Zihan Zhu*, Martin R. Oswald
+
+*Project Lead
 </h5>
 
 <div align="center">
@@ -96,6 +98,11 @@ python demo.py --calib calib/100613.yml \
                --gsvis
 ```
 
+### Calcuate the ATE (RMSE)
+```bash
+evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as
+```
+
 ---
 
 ## 🧪 Modes
@@ -136,6 +143,11 @@ python demo.py --calib calib/100613.yml \
                          --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
                          --stride 1 \
                          --output output/100613
+```
+
+### 4. **Calcuate the ATE (RMSE)**
+```bash
+evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as
 ```
 
 ---
