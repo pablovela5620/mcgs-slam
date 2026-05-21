@@ -18,7 +18,7 @@ TL;DR: A dense SLAM system that leverages multi-camera input and 3D Gaussian Spl
 <br>
 
 <div align="center">
-  <img src="figures/100613_ours.gif" alt="100613_ours" />
+  <img src="figures/teaser.png" alt="teaser" />
 </div>
 <br>
 
@@ -98,9 +98,15 @@ python demo.py --calib calib/100613.yml \
                --gsvis
 ```
 
-### Calcuate the ATE (RMSE)
+### ATE (RMSE)
 ```bash
 evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as
+```
+
+### TSDF Visualization
+```bash
+python tsdf_integrate.py --result output/100613 --device cpu:0 --per_camera
+python vis_tsdf_per_cam.py --result output/100613
 ```
 
 ---
@@ -143,11 +149,6 @@ python demo.py --calib calib/100613.yml \
                          --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
                          --stride 1 \
                          --output output/100613
-```
-
-### 4. **Calcuate the ATE (RMSE)**
-```bash
-evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as
 ```
 
 ---

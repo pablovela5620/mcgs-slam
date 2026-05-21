@@ -102,21 +102,29 @@ def eval_rendering_kf(
     
     image_save_dir = f'{save_dir}/renders/image_{iteration}'
     depth_save_dir = f'{save_dir}/renders/depth_{iteration}'
-    os.makedirs(image_save_dir, exist_ok=True)
-    os.makedirs(depth_save_dir, exist_ok=True)
-    
-    for idx, frame in enumerate(viewpoints.values()):
+
+    # per-camera frame counter so each camera's renders are numbered independently
+    cam_counters = {}
+    for frame in viewpoints.values():
         gtimage = frame.original_image.cuda()
 
         rendering = render(frame, gaussians, background)
         image = (torch.exp(frame.exposure_a)) * rendering["render"] + frame.exposure_b
         image = torch.clamp(image, 0.0, 1.0)
         depth = rendering["depth"].detach().squeeze().cpu().numpy()
-        
+
         pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(f'{image_save_dir}/{idx:06d}.jpg', pred)
-        cv2.imwrite(f'{depth_save_dir}/{idx:06d}.png', np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
+
+        cam_idx = getattr(frame, 'cam_idx', 0)
+        cam_image_dir = f'{image_save_dir}/cam{cam_idx}'
+        cam_depth_dir = f'{depth_save_dir}/cam{cam_idx}'
+        os.makedirs(cam_image_dir, exist_ok=True)
+        os.makedirs(cam_depth_dir, exist_ok=True)
+        save_idx = cam_counters.get(cam_idx, 0)
+        cam_counters[cam_idx] = save_idx + 1
+        cv2.imwrite(f'{cam_image_dir}/{save_idx:06d}.jpg', pred)
+        cv2.imwrite(f'{cam_depth_dir}/{save_idx:06d}.png', np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
 
         mask = gtimage > 0
         psnr_score = psnr((image[mask]).unsqueeze(0), (gtimage[mask]).unsqueeze(0))

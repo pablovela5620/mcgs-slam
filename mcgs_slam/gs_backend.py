@@ -75,12 +75,13 @@ class GSBackEnd(mp.Process):
             self.K = K = list(packet["intrinsics"][0]) + [W, H]
             self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
 
+        cam_idx = packet.get('cam_idx', 0)
         w2c = SE3(packet["poses"]).matrix().cuda()
         for i, idx in enumerate(packet['viz_idx']):
             idx = idx.item()
             idx = packet['tstamp'][i].item()
             tstamp = packet['tstamp'][i].item()
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp)
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
             if idx not in self.current_window:
                 self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
                 if not self.initialized:
@@ -136,12 +137,16 @@ class GSBackEnd(mp.Process):
                 rot = SO3(updates.data[:,3:]) * rot
                 self.gaussians._rotation[:] = rot.data
 
+        # packet stacks all cameras in order [cam0 frames, cam1 frames, ...],
+        # so the camera index of frame i is i // n_per_cam.
+        n_per_cam = max(1, len(packet['viz_idx']) // cam_num)
         w2c = SE3(packet["poses"]).matrix().cuda()
         for i, idx in enumerate(packet['viz_idx']):
             idx = idx.item()
             idx = packet['tstamp'][i].item()
             tstamp = packet['tstamp'][i].item()
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp)
+            cam_idx = i // n_per_cam
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
             if idx not in self.current_window:
                 self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
                 if not self.initialized:

@@ -78,9 +78,10 @@ class Mcgs:
                 'normals':  self.video.normals[viz_idx.cpu()],
                 'depths':   self.scale_factor / self.video.disps_up[viz_idx.cpu()].to(device='cpu'),
                 'intrinsics':   self.video.intrinsics[viz_idx].to(device='cpu')[:, 0, :4] * 8,
+                'cam_idx':  0,
                 'pose_updates':  dposes.to(device='cpu') if dposes is not None else None,
                 'scale_updates': dscale.to(device='cpu') if dscale is not None else None}
-        
+
         self.gs.process_track_data(data)
         
         if self.video.multi:
@@ -90,12 +91,13 @@ class Mcgs:
                 
                 data = {'viz_idx':  viz_idx.to(device='cpu'),
                         'tstamp':   self.video.tstamp[viz_idx].to(device='cpu') + 500 * i,
-                        'poses':    self._scale_poses((T_ci_c0.cpu() * lietorch.SE3(self.video.poses[viz_idx].to(device='cpu')[None])).data[0], 
+                        'poses':    self._scale_poses((T_ci_c0.cpu() * lietorch.SE3(self.video.poses[viz_idx].to(device='cpu')[None])).data[0],
                                                         scale_factor = self.scale_factor),
                         'images':   self.video.images_up_list[i][viz_idx.cpu()],
                         'normals':  self.video.normals_list[i][viz_idx.cpu()],
                         'depths':   self.scale_factor / self.video.disps_up_list[i][viz_idx.cpu()].to(device='cpu'),
                         'intrinsics':   self.video.intrinsics[viz_idx].to(device='cpu')[:, i + 1, :4] * 8,
+                        'cam_idx':  i,
                         'pose_updates':  dposes.to(device='cpu') if dposes is not None else None,
                         'scale_updates': dscale.to(device='cpu') if dscale is not None else None}
             

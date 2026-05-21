@@ -62,7 +62,7 @@ class Camera(nn.Module):
         self.projection_matrix = projection_matrix.to(device=device)
 
     @staticmethod
-    def init_from_tracking(color, depth, normal, pose, idx, projection_matrix, K, tstamp=None):
+    def init_from_tracking(color, depth, normal, pose, idx, projection_matrix, K, tstamp=None, cam_idx=0):
         cam = Camera(
             idx,
             color,
@@ -81,6 +81,7 @@ class Camera(nn.Module):
         cam.R = pose[:3, :3]
         cam.T = pose[:3, 3]
         cam.tstamp = tstamp
+        cam.cam_idx = cam_idx
         return cam
     
     @staticmethod
