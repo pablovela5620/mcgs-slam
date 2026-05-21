@@ -1,0 +1,161 @@
+<h2 align="center"> <a href="https://zhihao-ethz.github.io/mcgs-slam">MCGS-SLAM: A Multi-Camera SLAM Framework Using Gaussian Splatting for High-Fidelity Mapping</a>
+</h2>
+
+<h5 align="center">
+
+[![arXiv](https://img.shields.io/badge/Arxiv-2509.14191-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2509.14191) 
+[![Home Page](https://img.shields.io/badge/Project-Website-33728E.svg)](https://zhihao-ethz.github.io/mcgs-slam) 
+[![ICRA 2026](https://img.shields.io/badge/ICRA-2026-e28353.svg)](https://2026.ieee-icra.org) 
+
+Zhihao Cao, Hanyu Wu, Li Wa Tang, Zizhou Luo, Wei Zhang, Marc Pollefeys, Zihan Zhu, Martin R. Oswald
+</h5>
+
+<div align="center">
+TL;DR: A dense SLAM system that leverages multi-camera input and 3D Gaussian Splatting.
+</div>
+<br>
+
+<div align="center">
+  <img src="figures/100613_ours.gif" alt="100613_ours" />
+</div>
+<br>
+
+---
+
+## 📦 Installation
+
+Create a new Conda environment and install dependencies. Our setup assumes:
+
+* Ubuntu 22.04
+* PyTorch with CUDA 11.8
+* GPU: NVIDIA RTX 3080 Ti (16GB VRAM)
+
+```bash
+conda env create -f environment.yaml
+conda activate mcgs_slam_v1
+conda install -c "nvidia/label/cuda-11.8.0" cuda-nvcc=11.8 cuda-cudart-dev=11.8
+conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
+```
+
+Install additional components:
+
+```bash
+export CUDA_HOME=$CONDA_PREFIX
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+export CC=gcc-11
+export CXX=g++-11
+pip install -r requirement.txt --no-build-isolation
+pip install -U openmim
+mim install mmengine mmcv
+```
+
+Install DROID and MCBA:
+```bash
+export CC=gcc-11
+export CXX=g++-11
+python setup.py install
+```
+
+---
+
+## 📥 Download the Data
+
+```bash
+wget https://polybox.ethz.ch/index.php/s/JAJpZb2RJAjd4Y5/download/data.zip
+unzip data.zip
+```
+
+---
+
+## 🚀 Run MCGS-SLAM
+
+### Non-visual Mapping Mode
+
+```bash
+export seq=data/100613
+python demo.py --calib calib/100613.yml \
+               --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+               --stride 1 \
+               --output output/100613
+```
+
+### Visual Mapping Mode (with Gaussian Splatting Viewer)
+
+```bash
+export seq=data/100613
+python demo.py --calib calib/100613.yml \
+               --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+               --stride 1 \
+               --output output/100613 \
+               --gsvis
+```
+
+---
+
+## 🧪 Modes
+
+### 1. **Full Optimization Mode (MCBA + JDSA + Prior Depth)**
+
+This mode uses multi-camera bundle adjustment with joint depth–scale alignment and prior-guided depth initialization.
+
+```bash
+export seq=data/100613
+python demo.py --calib calib/100613.yml \
+                         --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+                         --stride 1 \
+                         --output output/100613 \
+                         --prgbd --jdsa
+```
+
+### 2. **MCBA + Prior Depth Only (without JDSA)**
+
+JDSA is disabled. Depth is still initialized via priors (e.g., Metric3D).
+
+```bash
+export seq=data/100613
+python demo.py --calib calib/100613.yml \
+                         --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+                         --stride 1 \
+                         --output output/100613 \
+                         --prgbd
+```
+
+### 3. **Minimal Optimization Mode (No Prior, No JDSA)**
+
+A simpler version of our method using only multi-view photometric and geometric consistency.
+
+```bash
+export seq=data/100613
+python demo.py --calib calib/100613.yml \
+                         --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+                         --stride 1 \
+                         --output output/100613
+```
+
+---
+
+## 🛠️ Dependencies
+
+* Python 3.8+
+* PyTorch >= 1.13.0 (CUDA 11.8)
+* OpenMMLab stack: `mmengine`, `mmcv`
+* NumPy, OpenCV, PyYAML, etc. (installed via `environment.yaml`)
+
+---
+
+## 📸 Citation and Acknowledgement
+
+If you find this project useful, please consider citing our paper.
+
+```
+@article{cao2025mcgs,
+  title={Mcgs-slam: A multi-camera slam framework using gaussian splatting for high-fidelity mapping},
+  author={Cao, Zhihao and Wu, Hanyu and Tang, Li Wa and Luo, Zizhou and Zhang, Wei and Pollefeys, Marc and Zhu, Zihan and Oswald, Martin R},
+  journal={arXiv preprint arXiv:2509.14191},
+  year={2025}
+}
+```
+
+Parts of the code are adapted or reimplemented based on ideas from [BAMF-SLAM](https://arxiv.org/abs/2306.01173), [Hi-SLAM2](https://arxiv.org/abs/2411.17982), and [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).

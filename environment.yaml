@@ -1,0 +1,38 @@
+name: mcgs_slam_v1
+channels:
+  - rusty1s
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - numpy=1.26.4
+  - torchaudio
+  - torchvision
+  - pytorch=2.1.2
+  - pytorch-cuda=11.8
+  - cudatoolkit=11.8
+  - scipy
+  - opencv
+  - tqdm
+  - suitesparse
+  - matplotlib
+  - pyyaml
+  - lightning
+  - wheel
+  - pip
+  - pip:
+    - numpy==1.26.4
+    - setuptools==69.5.1
+    - timm
+    - open3d
+    - evo
+    - munch
+    - plyfile
+    - sophuspy
+    - torchmetrics
+    - pyrender
+    - imgviz
+    - rich
+    - glfw
+    - glm
