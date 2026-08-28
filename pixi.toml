@@ -3,6 +3,8 @@ name = "mcgs-slam"
 version = "1.0.0"
 description = "MCGS-SLAM: multi-camera Gaussian-splatting SLAM (pixi-only, linux-64 + linux-aarch64)"
 channels = ["conda-forge"]
+# The inline per-platform cuda spec below needs pixi >= 0.76.
+requires-pixi = ">=0.76"
 # torch cu130 wheels and the conda CUDA 13 toolchain both need a >= 580 driver.
 platforms = [
     { platform = "linux-64", cuda = "13.0" },
