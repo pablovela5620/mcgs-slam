@@ -33,14 +33,16 @@ def scatter_sum(src: Tensor, index: Tensor, dim: int, dim_size: int | None = Non
     out_shape: list[int] = list(src.shape)
     out_shape[dim] = dim_size
     out: Tensor = torch.zeros(out_shape, dtype=src.dtype, device=src.device)
-    if src.numel() == 0:
-        return out
     return out.scatter_add_(dim, _expand_index(index, src, dim), src)
 
 
 def scatter_mean(src: Tensor, index: Tensor, dim: int, dim_size: int | None = None) -> Tensor:
     """Mean-reduce src into dim_size bins along dim, like torch_scatter.scatter_mean."""
     total: Tensor = scatter_sum(src, index, dim, dim_size)
-    ones: Tensor = torch.ones_like(src)
-    count: Tensor = scatter_sum(ones, index, dim, total.shape[dim])
-    return total / count.clamp(min=1)
+    # Bin counts depend only on the 1-D index; counting with ones_like(src)
+    # would allocate and scatter a full copy of src for nothing.
+    ones: Tensor = torch.ones(index.shape, dtype=src.dtype, device=src.device)
+    count: Tensor = scatter_sum(ones, index, 0, total.shape[dim])
+    view_shape: list[int] = [1] * total.dim()
+    view_shape[dim] = -1
+    return total / count.clamp(min=1).view(view_shape)

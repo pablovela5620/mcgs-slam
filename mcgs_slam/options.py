@@ -60,6 +60,10 @@ def load_configs(args):
     if args.multi:
         args.T_cami_cam0 = torch.as_tensor(params['T_cami_cam0'], dtype=torch.float, device="cuda")
 
+    # The tracker drops input dir 1 (the stereo-right duplicate) when filling
+    # the video buffers, so video-order cameras map to these stream columns.
+    args.stream_indices = ([0] + list(range(2, args.multi))) if args.multi else [0]
+
     args.timescale = float(params['timescale'])
 
     if 'ht' in params and 'wd' in params:

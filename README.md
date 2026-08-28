@@ -88,8 +88,8 @@ In addition, Multi-Camera Airsim (MC-Airsim) Dataset is available from [https://
 ### With a Rerun recording (default)
 
 ```bash
-pixi run demo          # writes output/100613/mcgs_slam.rrd
-pixi run demo-viewer   # same run with a live Rerun viewer
+pixi run demo                # writes output/100613/mcgs_slam.rrd
+pixi run demo --rerun-spawn  # same run with a live Rerun viewer
 ```
 
 The Rerun recording contains the multi-camera rig (frustums + images), the
@@ -108,8 +108,9 @@ pixi run python demo.py --calib calib/100613.yml \
 ```
 
 `--rerun-spawn` opens a live viewer, `--rr-splat-every N` controls the
-Gaussian snapshot cadence. The legacy OpenGL viewer is still available with
-`--gsvis` (requires glfw/imgviz/pyopengl, not in the pixi env).
+Gaussian snapshot cadence. The legacy OpenGL viewer behind `--gsvis` needs
+glfw/imgviz/PyOpenGL, which the pixi env does not ship — add them yourself
+(`pixi add glfw pyopengl` + `pixi add --pypi imgviz glm`) if you want it.
 
 ### ATE (RMSE)
 ```bash

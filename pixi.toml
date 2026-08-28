@@ -67,14 +67,14 @@ evo = ">=1.28"
 [tasks._build-droid-lietorch]
 cmd = "python setup.py build_ext --inplace"
 description = "Build droid_backends and lietorch CUDA extensions"
-inputs = ["setup.py", "src/*.cpp", "src/*.cu", "thirdparty/lietorch/lietorch/src/*", "thirdparty/lietorch/lietorch/include/*"]
+inputs = ["pixi.toml", "setup.py", "src/*.cpp", "src/*.cu", "thirdparty/lietorch/lietorch/src/*", "thirdparty/lietorch/lietorch/include/*"]
 outputs = ["droid_backends*.so", "thirdparty/lietorch/lietorch_backends*.so"]
 
 [tasks._build-simple-knn]
 cmd = "python setup.py build_ext --inplace"
 cwd = "thirdparty/simple-knn"
 description = "Build simple-knn CUDA extension"
-inputs = ["thirdparty/simple-knn/setup.py", "thirdparty/simple-knn/*.cu", "thirdparty/simple-knn/*.h"]
+inputs = ["pixi.toml", "thirdparty/simple-knn/setup.py", "thirdparty/simple-knn/*.cu", "thirdparty/simple-knn/*.h"]
 outputs = ["thirdparty/simple-knn/simple_knn/_C*.so"]
 
 [tasks._build-diff-gaussian-rasterization]
@@ -82,6 +82,7 @@ cmd = "python setup.py build_ext --inplace"
 cwd = "thirdparty/diff-gaussian-rasterization"
 description = "Build diff-gaussian-rasterization CUDA extension"
 inputs = [
+    "pixi.toml",
     "thirdparty/diff-gaussian-rasterization/setup.py",
     "thirdparty/diff-gaussian-rasterization/cuda_rasterizer/*",
     "thirdparty/diff-gaussian-rasterization/*.cu",
@@ -93,16 +94,18 @@ depends-on = ["_build-droid-lietorch", "_build-simple-knn", "_build-diff-gaussia
 description = "Build all CUDA extensions"
 
 # ── Assets ──────────────────────────────────────────────────────────────────
+# Tests for a leaf file (not the directory) so an interrupted unzip re-runs,
+# and downloads to a mktemp path so concurrent runs cannot collide.
 [tasks._download-data]
-cmd = "test -d data/100613 || (wget -q -O /tmp/mcgs-data.zip https://polybox.ethz.ch/index.php/s/JAJpZb2RJAjd4Y5/download/data.zip && unzip -q -o /tmp/mcgs-data.zip -d . && rm /tmp/mcgs-data.zip)"
+cmd = "test -f data/100613/gt_poses.txt || (tmp=$(mktemp --suffix=.zip) && wget -q -O $tmp https://polybox.ethz.ch/index.php/s/JAJpZb2RJAjd4Y5/download/data.zip && unzip -q -o $tmp -d . && rm $tmp)"
 description = "Download the example Waymo sequence (100613)"
-outputs = ["data/100613"]
+outputs = ["data/100613/gt_poses.txt"]
 
 [tasks._fetch-metric3d]
 cmd = "python -c \"import torch; torch.hub.load('yvanyin/metric3d', 'metric3d_vit_small', pretrain=True, trust_repo=True)\" && mkdir -p .pixi-cache && touch .pixi-cache/metric3d.stamp"
 description = "Pre-fetch the Metric3D ViT-small prior model via torch.hub"
-# Metric3D imports the vendored mmcv stub (mcgs_slam/mmcv).
-env = { PYTHONPATH = "mcgs_slam" }
+# Metric3D imports the vendored mmcv stub.
+env = { PYTHONPATH = "thirdparty/mmcv-shim" }
 outputs = [".pixi-cache/metric3d.stamp"]
 
 # ── Demo ────────────────────────────────────────────────────────────────────
@@ -115,7 +118,5 @@ description = "Run MCGS-SLAM on the example sequence, logging to a Rerun .rrd"
 cmd = "evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as"
 description = "ATE RMSE of the estimated keyframe trajectory vs ground truth (run demo first)"
 
-[tasks.demo-viewer]
-cmd = "python demo.py --calib calib/100613.yml --imagedir data/100613/front data/100613/front_right data/100613/front_left data/100613/front_right --stride 1 --output output/100613 --rerun-spawn"
-depends-on = ["build", "_download-data", "_fetch-metric3d"]
-description = "Run MCGS-SLAM with a live Rerun viewer"
+# For a live viewer instead of / in addition to the .rrd:
+#   pixi run demo --rerun-spawn   (pixi appends extra args to the task cmd)

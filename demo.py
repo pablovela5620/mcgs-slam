@@ -7,13 +7,14 @@ sys.path.append(os.path.join(_ROOT, 'mcgs_slam'))   # nopep8
 sys.path.append(os.path.join(_ROOT, 'thirdparty/lietorch'))   # nopep8
 sys.path.append(os.path.join(_ROOT, 'thirdparty/simple-knn'))   # nopep8
 sys.path.append(os.path.join(_ROOT, 'thirdparty/diff-gaussian-rasterization'))   # nopep8
+sys.path.append(os.path.join(_ROOT, 'thirdparty/mmcv-shim'))   # for Metric3D via torch.hub  # nopep8
 
 import cv2
 import time
 import torch
 import numpy as np
 
-from mcgs import Mcgs
+from mcgs import Mcgs, SCALE_FACTOR
 from tqdm import tqdm
 from mcgs_slam.utils import save_utils
 from mcgs_slam.streams import image_stream
@@ -41,12 +42,9 @@ if __name__ == '__main__':
 
     rr_logger = None
     if args.rrd or args.rerun_spawn:
-        # The pipeline skips input dir 1 (stereo-right duplicate) when filling
-        # the video buffers, so cameras are logged in video order [0, 2, 3, ...].
-        stream_indices = [0] + list(range(2, args.multi)) if args.multi else [0]
-        cam_names = [os.path.basename(os.path.normpath(args.imagedir[i])) for i in stream_indices]
-        rr_logger = RerunLogger(cam_names, stream_indices, scale_factor=0.2, save_path=args.rrd,
-                                spawn=args.rerun_spawn, splat_every=args.rr_splat_every)
+        rr_logger = RerunLogger(args.imagedir, args.stream_indices, scale_factor=SCALE_FACTOR,
+                                save_path=args.rrd, spawn=args.rerun_spawn,
+                                splat_every=args.rr_splat_every)
 
     mcgs = Mcgs(args, rr_logger=rr_logger)
     tstamps = {}
@@ -59,11 +57,7 @@ if __name__ == '__main__':
         tstamps[t] = timestamp
 
         if rr_logger is not None:
-            rr_logger.set_frame(t, timestamp)
-            if len(tstamps) == 1:
-                T_rig_cams = args.T_cami_cam0.cpu() if args.multi else torch.tensor([[0., 0, 0, 0, 0, 0, 1]])
-                rr_logger.log_calibration(T_rig_cams, intrinsics, args.wd, args.ht)
-            rr_logger.log_images(image)
+            rr_logger.log_frame(t, timestamp, image, intrinsics, mcgs.video)
 
         mcgs.track(t, timestamp, image, intrinsics=intrinsics)
 
