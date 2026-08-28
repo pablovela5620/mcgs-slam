@@ -21,6 +21,10 @@ TORCH_CUDA_ARCH_LIST = "12.1"
 # Ampere + Ada + consumer Blackwell for x86 boxes.
 [target.linux-64.activation.env]
 TORCH_CUDA_ARCH_LIST = "8.6;8.9;12.0"
+# PyPI torch pins the system libstdc++ for the process; on older distros
+# (e.g. Ubuntu 22.04) it lacks CXXABI_1.3.15, which conda-forge binaries
+# need. Preload the env's own (newer, backward-compatible) libstdc++.
+LD_PRELOAD = "$CONDA_PREFIX/lib/libstdc++.so.6"
 
 [dependencies]
 python = "3.12.*"
