@@ -17,13 +17,18 @@ from tqdm import trange
 from gs_backend import GSBackEnd
 from utils.utils import load_config
 
+# Pose/translation scale between the metric SLAM world and the Gaussian-map
+# world. Consumed by the GS packets and the Rerun logger — keep single-sourced.
+SCALE_FACTOR = 0.2
+
 class Mcgs:
-    def __init__(self, args, video=None):
+    def __init__(self, args, video=None, rr_logger=None):
         super(Mcgs, self).__init__()
         self.load_weights(args.weights)
         self.args = args
         self.config = load_config(args.config)
-        self.scale_factor = 0.2
+        self.scale_factor = SCALE_FACTOR
+        self.rr = rr_logger
 
         # store images, depth, poses, intrinsics (shared between processes)
         if video is None:
@@ -41,7 +46,7 @@ class Mcgs:
         self.backend = DroidBackend(self.net, self.video, self.args)
         
         # 3dgs
-        self.gs = GSBackEnd(self.config, self.args.output, args.gsvis)
+        self.gs = GSBackEnd(self.config, self.args.output, args.gsvis, rr_logger=rr_logger)
 
         # visualizer
         if args.vis:
@@ -64,13 +69,16 @@ class Mcgs:
         self.net.load_state_dict(state_dict)
         self.net.to("cuda:0").eval()
     
-    def _scale_poses(self, poses, scale_factor=0.2):
+    def _scale_poses(self, poses, scale_factor=SCALE_FACTOR):
         scaled_poses = poses.clone()
         scaled_poses[:, :3] *= scale_factor
         return scaled_poses
 
     def call_gs(self, viz_idx, dposes=None, dscale=None):
-        
+
+        if self.rr is not None:
+            self.rr.log_keyframe(self.video, viz_idx)
+
         data = {'viz_idx':  viz_idx.to(device='cpu'),
                 'tstamp':   self.video.tstamp[viz_idx].to(device='cpu'),
                 'poses':    self._scale_poses(self.video.poses[viz_idx].to(device='cpu'), scale_factor = self.scale_factor),
@@ -100,11 +108,19 @@ class Mcgs:
                         'cam_idx':  i,
                         'pose_updates':  dposes.to(device='cpu') if dposes is not None else None,
                         'scale_updates': dscale.to(device='cpu') if dscale is not None else None}
-            
+
                 self.gs.process_track_data(data)
-    
+
+        # One splat snapshot per keyframe update (cadence inside the logger),
+        # after every camera's packet has refined the map.
+        if self.rr is not None:
+            self.rr.log_gaussians(self.gs.gaussians)
+
     def call_global_gs(self, viz_idx, dposes=None, dscale=None):
-        
+
+        if self.rr is not None:
+            self.rr.log_keyframe(self.video, viz_idx)
+
         multi_cam_data = {
             'viz_idx': [],
             'tstamp': [],
@@ -147,6 +163,9 @@ class Mcgs:
         final_data['scale_updates'] = dscale.to(device='cpu') if dscale is not None else None
             
         self.gs.process_global_track_data(final_data, self.video.multi - 1)
+
+        if self.rr is not None:
+            self.rr.log_gaussians(self.gs.gaussians, force=True)
 
     def track(self, t, tstamp, image, intrinsics):
         """ main thread - update map """

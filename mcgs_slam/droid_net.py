@@ -15,7 +15,7 @@ from geom.ba import BA
 import geom.projective_ops as pops
 from geom.graph_utils import graph_to_edge_list, keyframe_indicies
 
-from torch_scatter import scatter_mean
+from geom.scatter import scatter_mean
 
 
 def cvx_upsample(data, mask):

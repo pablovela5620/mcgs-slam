@@ -15,12 +15,16 @@ from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
 from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
-from gaussian.gui import gui_utils, slam_gui
+try:
+    from gaussian.gui import gui_utils, slam_gui
+except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
+    gui_utils = slam_gui = None
 
 class GSBackEnd(mp.Process):
-    def __init__(self, config, save_dir, use_gui=False):
+    def __init__(self, config, save_dir, use_gui=False, rr_logger=None):
         super().__init__()
         self.config = config
+        self.rr = rr_logger
         
         self.iteration_count = 0
         self.viewpoints = {}
@@ -28,6 +32,9 @@ class GSBackEnd(mp.Process):
         self.initialized = False
         self.save_dir = save_dir
         self.use_gui = use_gui
+
+        if self.use_gui and gui_utils is None:
+            raise RuntimeError("--gsvis requires glfw/imgviz/PyOpenGL, which are not in the pixi env")
 
         self.opt_params = munchify(config["opt_params"])
         self.config["Training"]["monocular"] = False
@@ -69,6 +76,13 @@ class GSBackEnd(mp.Process):
         self.lambda_dnormal = self.config["Training"]["lambda_dnormal"]
 
 
+    def _log_renders(self, viewpoints_by_cam):
+        """Log a splat-render vs ground-truth pair per camera to Rerun."""
+        with torch.no_grad():
+            for cam_idx, vp in viewpoints_by_cam.items():
+                render_pkg = render(vp, self.gaussians, self.background)
+                self.rr.log_render_comparison(cam_idx, render_pkg["render"], vp.original_image)
+
     def process_track_data(self, packet):
         if not hasattr(self, "projection_matrix"):
             H, W = packet["images"].shape[-2:]
@@ -99,6 +113,9 @@ class GSBackEnd(mp.Process):
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
 
+        if self.rr is not None:
+            self._log_renders({cam_idx: viewpoint})
+
         if self.use_gui:
             keyframes = [self.viewpoints[kf_idx] for kf_idx in self.current_window]
             current_window_dict = {}
@@ -111,7 +128,7 @@ class GSBackEnd(mp.Process):
                     kf_window=current_window_dict,
                     gtcolor=viewpoint.original_image,
                     gtdepth=viewpoint.depth.numpy()))
-            
+
     def process_global_track_data(self, packet, cam_num):
         if not hasattr(self, "projection_matrix"):
             H, W = packet["images"].shape[-2:]
@@ -164,6 +181,9 @@ class GSBackEnd(mp.Process):
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
 
+        if self.rr is not None:
+            self._log_renders({vp.cam_idx: vp for vp in self.viewpoints.values()})
+
         if self.use_gui:
             keyframes = [self.viewpoints[kf_idx] for kf_idx in self.current_window]
             current_window_dict = {}
@@ -180,6 +200,12 @@ class GSBackEnd(mp.Process):
     def finalize(self):
         self.color_refinement(iteration_total=self.gaussians.max_steps)
         self.gaussians.save_ply(f'{self.save_dir}/3dgs_final.ply')
+
+        if self.rr is not None:
+            self.rr.set_refine_iter(self.gaussians.max_steps)
+            self.rr.log_text(f"final map: {self.gaussians.get_xyz.shape[0]} gaussians")
+            self.rr.log_gaussians(self.gaussians, force=True, cap=False)
+            self._log_renders({vp.cam_idx: vp for vp in self.viewpoints.values()})
 
         poses_cw = []
         for view in self.viewpoints.values():
@@ -369,6 +395,11 @@ class GSBackEnd(mp.Process):
                 self.keyframe_optimizers.step()
                 self.keyframe_optimizers.zero_grad(set_to_none=True)
                 update_pose(viewpoint_cam)
+
+            # skip iteration_total: finalize() logs the final map right after
+            if self.rr is not None and iteration % self.rr.refine_every == 0 and iteration < iteration_total:
+                self.rr.set_refine_iter(iteration)
+                self.rr.log_gaussians(self.gaussians, force=True)
 
             if self.use_gui and iteration % 50 == 0:
                 self.q_main2vis.put(gui_utils.GaussianPacket(gaussians=clone_obj(self.gaussians)))

@@ -1,0 +1,128 @@
+[workspace]
+name = "mcgs-slam"
+version = "1.0.0"
+description = "MCGS-SLAM: multi-camera Gaussian-splatting SLAM (pixi-only, linux-64 + linux-aarch64)"
+channels = ["conda-forge"]
+# The inline per-platform cuda spec below needs pixi >= 0.76.
+requires-pixi = ">=0.76"
+# torch cu130 wheels and the conda CUDA 13 toolchain both need a >= 580 driver.
+platforms = [
+    { platform = "linux-64", cuda = "13.0" },
+    { platform = "linux-aarch64", cuda = "13.0" },
+]
+
+# CUDA_HOME points at the conda env so torch cpp_extension finds nvcc + headers.
+# cxx-compiler's activation scripts export CC/CXX to the conda gcc/g++.
+[activation.env]
+CUDA_HOME = "$CONDA_PREFIX"
+
+# GB10 (DGX Spark) is sm_121.
+[target.linux-aarch64.activation.env]
+TORCH_CUDA_ARCH_LIST = "12.1"
+
+# Ampere + Ada + consumer Blackwell for x86 boxes.
+[target.linux-64.activation.env]
+TORCH_CUDA_ARCH_LIST = "8.6;8.9;12.0"
+# PyPI torch pins the system libstdc++ for the process; on older distros
+# (e.g. Ubuntu 22.04) it lacks CXXABI_1.3.15, which conda-forge binaries
+# need. Preload the env's own (newer, backward-compatible) libstdc++.
+LD_PRELOAD = "$CONDA_PREFIX/lib/libstdc++.so.6"
+
+[dependencies]
+python = "3.12.*"
+numpy = ">=1.26"
+opencv = { version = ">=4.10", build = "headless_*" }
+scipy = ">=1.11"
+tqdm = ">=4.66"
+matplotlib-base = ">=3.8"
+pyyaml = ">=6.0"
+munch = ">=4.0"
+plyfile = ">=1.0"
+rich = ">=13"
+jaxtyping = ">=0.2.36"
+einops = ">=0.8"
+open3d = ">=0.19"
+rerun-sdk = ">=0.36.3,<0.37"
+# CUDA build toolchain, pinned to the same major.minor as torch's bundled cu130 runtime.
+cuda-nvcc = "13.0.*"
+cuda-cudart-dev = "13.0.*"
+cuda-cccl = "13.0.*"
+cuda-version = "13.0.*"
+# torch's CUDAContext.h includes cusparse/cublas/cusolver headers.
+libcusparse-dev = "*"
+libcublas-dev = "*"
+libcusolver-dev = "*"
+cxx-compiler = "*"
+ninja = ">=1.11"
+# setup.py install was removed in setuptools 80; the CUDA extension builds use it.
+setuptools = "<80"
+wheel = "*"
+
+[pypi-dependencies]
+# PyPI torch wheels bundle the CUDA 13.0 runtime; host only needs a driver.
+torch = "==2.13.0"
+torchvision = "==0.28.0"
+torchmetrics = ">=1.4"
+# Metric3D (torch.hub) uses mmengine's Config when mmcv is absent, and timm for its backbones.
+mmengine = ">=0.10"
+timm = ">=1.0"
+# Trajectory evaluation (evo_ape) against the dataset's ground-truth poses.
+evo = ">=1.28"
+
+# ── CUDA extension builds (setuptools build_ext, no pip; .so files land in-tree) ──
+[tasks._build-droid-lietorch]
+cmd = "python setup.py build_ext --inplace"
+description = "Build droid_backends and lietorch CUDA extensions"
+inputs = ["pixi.toml", "setup.py", "src/*.cpp", "src/*.cu", "thirdparty/lietorch/lietorch/src/*", "thirdparty/lietorch/lietorch/include/*"]
+outputs = ["droid_backends*.so", "thirdparty/lietorch/lietorch_backends*.so"]
+
+[tasks._build-simple-knn]
+cmd = "python setup.py build_ext --inplace"
+cwd = "thirdparty/simple-knn"
+description = "Build simple-knn CUDA extension"
+inputs = ["pixi.toml", "thirdparty/simple-knn/setup.py", "thirdparty/simple-knn/*.cu", "thirdparty/simple-knn/*.h"]
+outputs = ["thirdparty/simple-knn/simple_knn/_C*.so"]
+
+[tasks._build-diff-gaussian-rasterization]
+cmd = "python setup.py build_ext --inplace"
+cwd = "thirdparty/diff-gaussian-rasterization"
+description = "Build diff-gaussian-rasterization CUDA extension"
+inputs = [
+    "pixi.toml",
+    "thirdparty/diff-gaussian-rasterization/setup.py",
+    "thirdparty/diff-gaussian-rasterization/cuda_rasterizer/*",
+    "thirdparty/diff-gaussian-rasterization/*.cu",
+]
+outputs = ["thirdparty/diff-gaussian-rasterization/diff_gaussian_rasterization/_C*.so"]
+
+[tasks.build]
+depends-on = ["_build-droid-lietorch", "_build-simple-knn", "_build-diff-gaussian-rasterization"]
+description = "Build all CUDA extensions"
+
+# ── Assets ──────────────────────────────────────────────────────────────────
+# Tests for a leaf file (not the directory) so an interrupted unzip re-runs,
+# and downloads to a mktemp path so concurrent runs cannot collide.
+[tasks._download-data]
+cmd = "test -f data/100613/gt_poses.txt || (tmp=$(mktemp --suffix=.zip) && wget -q -O $tmp https://polybox.ethz.ch/index.php/s/JAJpZb2RJAjd4Y5/download/data.zip && unzip -q -o $tmp -d . && rm $tmp)"
+description = "Download the example Waymo sequence (100613)"
+outputs = ["data/100613/gt_poses.txt"]
+
+[tasks._fetch-metric3d]
+cmd = "python -c \"import torch; torch.hub.load('yvanyin/metric3d', 'metric3d_vit_small', pretrain=True, trust_repo=True)\" && mkdir -p .pixi-cache && touch .pixi-cache/metric3d.stamp"
+description = "Pre-fetch the Metric3D ViT-small prior model via torch.hub"
+# Metric3D imports the vendored mmcv stub.
+env = { PYTHONPATH = "thirdparty/mmcv-shim" }
+outputs = [".pixi-cache/metric3d.stamp"]
+
+# ── Demo ────────────────────────────────────────────────────────────────────
+[tasks.demo]
+cmd = "python demo.py --calib calib/100613.yml --imagedir data/100613/front data/100613/front_right data/100613/front_left data/100613/front_right --stride 1 --output output/100613 --rrd output/100613/mcgs_slam.rrd"
+depends-on = ["build", "_download-data", "_fetch-metric3d"]
+description = "Run MCGS-SLAM on the example sequence, logging to a Rerun .rrd"
+
+[tasks.ate]
+cmd = "evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as"
+description = "ATE RMSE of the estimated keyframe trajectory vs ground truth (run demo first)"
+
+# For a live viewer instead of / in addition to the .rrd:
+#   pixi run demo --rerun-spawn   (pixi appends extra args to the task cmd)

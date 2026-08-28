@@ -28,6 +28,10 @@ def get_args():
     parser.add_argument("--prgbd", action="store_true", help="pseudo rgbd")
     parser.add_argument("--gsvis", action="store_true")
 
+    parser.add_argument("--rrd", type=str, default=None, help="save a Rerun recording (.rrd) to this path")
+    parser.add_argument("--rerun-spawn", action="store_true", help="spawn a live Rerun viewer")
+    parser.add_argument("--rr-splat-every", type=int, default=10, help="log a Gaussian map snapshot every N keyframe updates")
+
     parser.add_argument("--beta", type=float, default=0.3, help="weight for translation / rotation components of flow")
     parser.add_argument("--filter_thresh", type=float, default=2.4, help="how much motion before considering new keyframe")
     parser.add_argument("--warmup", type=int, default=10, help="number of warmup frames")
@@ -55,6 +59,10 @@ def load_configs(args):
     args.base = np.array(params['baseline'])
     if args.multi:
         args.T_cami_cam0 = torch.as_tensor(params['T_cami_cam0'], dtype=torch.float, device="cuda")
+
+    # The tracker drops input dir 1 (the stereo-right duplicate) when filling
+    # the video buffers, so video-order cameras map to these stream columns.
+    args.stream_indices = ([0] + list(range(2, args.multi))) if args.multi else [0]
 
     args.timescale = float(params['timescale'])
 
