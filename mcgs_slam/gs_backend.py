@@ -15,12 +15,16 @@ from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
 from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
-from gaussian.gui import gui_utils, slam_gui
+try:
+    from gaussian.gui import gui_utils, slam_gui
+except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
+    gui_utils = slam_gui = None
 
 class GSBackEnd(mp.Process):
-    def __init__(self, config, save_dir, use_gui=False):
+    def __init__(self, config, save_dir, use_gui=False, rr_logger=None):
         super().__init__()
         self.config = config
+        self.rr = rr_logger
         
         self.iteration_count = 0
         self.viewpoints = {}
@@ -99,6 +103,12 @@ class GSBackEnd(mp.Process):
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
 
+        if self.rr is not None:
+            self.rr.log_gaussians(self.gaussians)
+            with torch.no_grad():
+                render_pkg = render(viewpoint, self.gaussians, self.background)
+                self.rr.log_render_comparison(cam_idx, render_pkg["render"], viewpoint.original_image)
+
         if self.use_gui:
             keyframes = [self.viewpoints[kf_idx] for kf_idx in self.current_window]
             current_window_dict = {}
@@ -111,7 +121,7 @@ class GSBackEnd(mp.Process):
                     kf_window=current_window_dict,
                     gtcolor=viewpoint.original_image,
                     gtdepth=viewpoint.depth.numpy()))
-            
+
     def process_global_track_data(self, packet, cam_num):
         if not hasattr(self, "projection_matrix"):
             H, W = packet["images"].shape[-2:]
@@ -140,6 +150,7 @@ class GSBackEnd(mp.Process):
         # packet stacks all cameras in order [cam0 frames, cam1 frames, ...],
         # so the camera index of frame i is i // n_per_cam.
         n_per_cam = max(1, len(packet['viz_idx']) // cam_num)
+        last_viewpoint_per_cam = {}
         w2c = SE3(packet["poses"]).matrix().cuda()
         for i, idx in enumerate(packet['viz_idx']):
             idx = idx.item()
@@ -147,6 +158,7 @@ class GSBackEnd(mp.Process):
             tstamp = packet['tstamp'][i].item()
             cam_idx = i // n_per_cam
             viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
+            last_viewpoint_per_cam[cam_idx] = viewpoint
             if idx not in self.current_window:
                 self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
                 if not self.initialized:
@@ -164,6 +176,13 @@ class GSBackEnd(mp.Process):
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
 
+        if self.rr is not None:
+            self.rr.log_gaussians(self.gaussians, force=True)
+            with torch.no_grad():
+                for vp_cam_idx, vp in last_viewpoint_per_cam.items():
+                    render_pkg = render(vp, self.gaussians, self.background)
+                    self.rr.log_render_comparison(vp_cam_idx, render_pkg["render"], vp.original_image)
+
         if self.use_gui:
             keyframes = [self.viewpoints[kf_idx] for kf_idx in self.current_window]
             current_window_dict = {}
@@ -180,6 +199,16 @@ class GSBackEnd(mp.Process):
     def finalize(self):
         self.color_refinement(iteration_total=self.gaussians.max_steps)
         self.gaussians.save_ply(f'{self.save_dir}/3dgs_final.ply')
+
+        if self.rr is not None:
+            self.rr.set_refine_iter(self.gaussians.max_steps)
+            self.rr.log_gaussians(self.gaussians, force=True, cap=False)
+            self.rr.log_text(f"final map: {self.gaussians.get_xyz.shape[0]} gaussians")
+            with torch.no_grad():
+                final_viewpoint_per_cam = {vp.cam_idx: vp for vp in self.viewpoints.values()}
+                for vp_cam_idx, vp in final_viewpoint_per_cam.items():
+                    render_pkg = render(vp, self.gaussians, self.background)
+                    self.rr.log_render_comparison(vp_cam_idx, render_pkg["render"], vp.original_image)
 
         poses_cw = []
         for view in self.viewpoints.values():
@@ -369,6 +398,10 @@ class GSBackEnd(mp.Process):
                 self.keyframe_optimizers.step()
                 self.keyframe_optimizers.zero_grad(set_to_none=True)
                 update_pose(viewpoint_cam)
+
+            if self.rr is not None and iteration % 10000 == 0:
+                self.rr.set_refine_iter(iteration)
+                self.rr.log_gaussians(self.gaussians, force=True)
 
             if self.use_gui and iteration % 50 == 0:
                 self.q_main2vis.put(gui_utils.GaussianPacket(gaussians=clone_obj(self.gaussians)))

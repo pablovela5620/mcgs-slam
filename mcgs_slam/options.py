@@ -28,6 +28,10 @@ def get_args():
     parser.add_argument("--prgbd", action="store_true", help="pseudo rgbd")
     parser.add_argument("--gsvis", action="store_true")
 
+    parser.add_argument("--rrd", type=str, default=None, help="save a Rerun recording (.rrd) to this path")
+    parser.add_argument("--rerun-spawn", action="store_true", help="spawn a live Rerun viewer")
+    parser.add_argument("--rr-splat-every", type=int, default=10, help="log a Gaussian map snapshot every N keyframe updates")
+
     parser.add_argument("--beta", type=float, default=0.3, help="weight for translation / rotation components of flow")
     parser.add_argument("--filter_thresh", type=float, default=2.4, help="how much motion before considering new keyframe")
     parser.add_argument("--warmup", type=int, default=10, help="number of warmup frames")

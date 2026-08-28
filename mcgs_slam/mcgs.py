@@ -18,12 +18,13 @@ from gs_backend import GSBackEnd
 from utils.utils import load_config
 
 class Mcgs:
-    def __init__(self, args, video=None):
+    def __init__(self, args, video=None, rr_logger=None):
         super(Mcgs, self).__init__()
         self.load_weights(args.weights)
         self.args = args
         self.config = load_config(args.config)
         self.scale_factor = 0.2
+        self.rr = rr_logger
 
         # store images, depth, poses, intrinsics (shared between processes)
         if video is None:
@@ -41,7 +42,7 @@ class Mcgs:
         self.backend = DroidBackend(self.net, self.video, self.args)
         
         # 3dgs
-        self.gs = GSBackEnd(self.config, self.args.output, args.gsvis)
+        self.gs = GSBackEnd(self.config, self.args.output, args.gsvis, rr_logger=rr_logger)
 
         # visualizer
         if args.vis:
@@ -70,7 +71,10 @@ class Mcgs:
         return scaled_poses
 
     def call_gs(self, viz_idx, dposes=None, dscale=None):
-        
+
+        if self.rr is not None:
+            self.rr.log_keyframe(self.video, viz_idx)
+
         data = {'viz_idx':  viz_idx.to(device='cpu'),
                 'tstamp':   self.video.tstamp[viz_idx].to(device='cpu'),
                 'poses':    self._scale_poses(self.video.poses[viz_idx].to(device='cpu'), scale_factor = self.scale_factor),
@@ -104,7 +108,10 @@ class Mcgs:
                 self.gs.process_track_data(data)
     
     def call_global_gs(self, viz_idx, dposes=None, dscale=None):
-        
+
+        if self.rr is not None:
+            self.rr.log_keyframe(self.video, viz_idx)
+
         multi_cam_data = {
             'viz_idx': [],
             'tstamp': [],
