@@ -5,7 +5,7 @@ import droid_backends
 from .chol import block_solve, schur_solve, solve_dR, schur_solve_prior
 import geom.projective_ops as pops
 
-from torch_scatter import scatter_sum
+from geom.scatter import scatter_sum
 
 
 # utility functions for scattering ops

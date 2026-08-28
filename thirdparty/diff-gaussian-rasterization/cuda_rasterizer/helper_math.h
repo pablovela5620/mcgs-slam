@@ -826,7 +826,7 @@ inline __host__ __device__ uint4 max(uint4 a, uint4 b) {
 // - linear interpolation between a and b, based on value t in [0, 1] range
 ////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ __host__ float lerp(float a, float b, float t) { return a + t * (b - a); }
+// scalar lerp removed: CUDA 13 / C++20 already provides a global lerp(float, float, float)
 inline __device__ __host__ float2 lerp(float2 a, float2 b, float t) { return a + t * (b - a); }
 inline __device__ __host__ float3 lerp(float3 a, float3 b, float t) { return a + t * (b - a); }
 inline __device__ __host__ float4 lerp(float4 a, float4 b, float t) { return a + t * (b - a); }

@@ -24,45 +24,53 @@ TL;DR: A dense SLAM system that leverages multi-camera input and 3D Gaussian Spl
 
 ---
 
-## 📦 Installation
+## 📦 Installation (pixi)
 
-Create a new Conda environment and install dependencies. Our setup assumes:
+The project is fully self-contained with [pixi](https://pixi.sh): one lockfile
+covers `linux-64` and `linux-aarch64` (DGX Spark / GB10), with PyTorch 2.13
+(CUDA 13.0) from PyPI and the CUDA 13 build toolchain from conda-forge.
+The only host requirement is an NVIDIA driver >= 580.
 
-* Ubuntu 22.04
-* PyTorch with CUDA 11.8
-* GPU: NVIDIA RTX 3080 Ti (16GB VRAM)
+```bash
+curl -fsSL https://pixi.sh/install.sh | bash   # if pixi is not installed
+pixi run demo                                  # installs env, builds CUDA extensions,
+                                               # downloads data + models, runs SLAM,
+                                               # and writes a Rerun recording
+```
+
+Individual steps, if you want them separately:
+
+```bash
+pixi install        # create the locked environment
+pixi run build      # compile droid_backends, lietorch, simple-knn, diff-gaussian-rasterization
+```
+
+The CUDA extensions are compiled for the arch in `TORCH_CUDA_ARCH_LIST`
+(`12.1` on linux-aarch64 for the GB10, `8.9;12.0` on linux-64 — see
+`pixi.toml`).
+
+<details>
+<summary>Legacy conda installation (upstream, CUDA 11.8)</summary>
 
 ```bash
 conda env create -f environment.yaml
 conda activate mcgs_slam_v1
 conda install -c "nvidia/label/cuda-11.8.0" cuda-nvcc=11.8 cuda-cudart-dev=11.8
 conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
-```
-
-Install additional components:
-
-```bash
 export CUDA_HOME=$CONDA_PREFIX
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-
 export CC=gcc-11
 export CXX=g++-11
 pip install -r requirement.txt --no-build-isolation
-pip install -U openmim
-mim install mmengine mmcv
-```
-
-Install DROID (CUDA), JDSA (CUDA) and MCBA (CUDA):
-```bash
-export CC=gcc-11
-export CXX=g++-11
 python setup.py install
 ```
+
+</details>
 
 ---
 
 ## 📥 Download the Data
+
+`pixi run demo` downloads the example sequence automatically. Manually:
 
 ```bash
 wget https://polybox.ethz.ch/index.php/s/JAJpZb2RJAjd4Y5/download/data.zip
@@ -77,26 +85,31 @@ In addition, Multi-Camera Airsim (MC-Airsim) Dataset is available from [https://
 
 ## 🚀 Run MCGS-SLAM
 
-### Non-visual Mapping Mode
+### With a Rerun recording (default)
 
 ```bash
-export seq=data/100613
-python demo.py --calib calib/100613.yml \
-               --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
-               --stride 1 \
-               --output output/100613
+pixi run demo          # writes output/100613/mcgs_slam.rrd
+pixi run demo-viewer   # same run with a live Rerun viewer
 ```
 
-### Visual Mapping Mode (with Gaussian Splatting Viewer)
+The Rerun recording contains the multi-camera rig (frustums + images), the
+per-keyframe estimated depth, the rig trajectory, and Gaussian-map snapshots
+logged with the native `GaussianSplats3D` archetype (rerun >= 0.36).
+
+### Manual invocation
 
 ```bash
 export seq=data/100613
-python demo.py --calib calib/100613.yml \
+pixi run python demo.py --calib calib/100613.yml \
                --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
                --stride 1 \
                --output output/100613 \
-               --gsvis
+               --rrd output/100613/mcgs_slam.rrd
 ```
+
+`--rerun-spawn` opens a live viewer, `--rr-splat-every N` controls the
+Gaussian snapshot cadence. The legacy OpenGL viewer is still available with
+`--gsvis` (requires glfw/imgviz/pyopengl, not in the pixi env).
 
 ### ATE (RMSE)
 ```bash

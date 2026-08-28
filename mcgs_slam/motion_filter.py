@@ -54,7 +54,7 @@ class MotionFilter:
     def __prior_extractor(self, im_tensor, intrinsic):
         
         if self.metric3d_model is None:
-            self.metric3d_model = torch.hub.load('yvanyin/metric3d', 'metric3d_vit_small', pretrain=True)
+            self.metric3d_model = torch.hub.load('yvanyin/metric3d', 'metric3d_vit_small', pretrain=True, trust_repo=True)
             self.metric3d_model.cuda().eval()
             
         image_size = (616, 1064)

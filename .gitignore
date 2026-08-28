@@ -157,3 +157,10 @@ data
 figures/*.pdf
 outputs
 *.ipynb
+
+# MCGS-SLAM pixi port
+.pixi/
+.pixi-cache/
+data/
+output/
+*.rrd
