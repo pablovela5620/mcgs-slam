@@ -112,6 +112,29 @@ Gaussian snapshot cadence. The legacy OpenGL viewer behind `--gsvis` needs
 glfw/imgviz/PyOpenGL, which the pixi env does not ship — add them yourself
 (`pixi add glfw pyopengl` + `pixi add --pypi imgviz glm`) if you want it.
 
+### MC-AirSim sequences
+
+Download `garden` / `factory` / `village` from the
+[dataset page](https://mcgs-slam.github.io/dataset/) into
+`data/mc-airsim/<seq>/`, then:
+
+```bash
+export seq=data/mc-airsim/garden
+pixi run python demo.py --calib calib/drones.yml \
+               --imagedir ${seq}/images/front_left ${seq}/images/front_center \
+                          ${seq}/images/front_right ${seq}/images/left_center \
+                          ${seq}/images/right_center \
+               --stride 1 \
+               --output output/airsim-garden \
+               --rrd output/airsim-garden/mcgs_slam.rrd
+```
+
+The imagedir order must match `calib/drones.yml`: directory 1
+(`front_center`) is the stereo partner of directory 0 (`front_left`) and is
+dropped from the mapped set, so the four mapped cameras are front_left,
+front_right, left_center, right_center. For ATE, convert the dataset's GT
+poses to TUM format first (the quaternions are xyzw).
+
 ### ATE (RMSE)
 ```bash
 evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as
