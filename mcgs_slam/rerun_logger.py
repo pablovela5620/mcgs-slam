@@ -158,16 +158,36 @@ class RerunLogger:
             )
             for i in range(len(self.cam_names))
         ]
-        # Keep estimated depth images out of the 3D view: their automatic
+        # Keep estimated depth images out of the 3D views: their automatic
         # backprojection would double up with the Gaussian map. render_vs_gt
         # has no spatial context and doesn't belong in 3D either.
         contents_3d: list[str] = (
             ["+ /**", f"- {COMPARE_ROOT}/**"]
             + [f"- {self._cam_path(i)}/pinhole/depth" for i in range(len(self.cam_names))]
         )
+        # Follow view (rerun-io/eye_control_example pattern, as in the
+        # examples-monorepo robocap blueprint): the view's origin IS the rig
+        # entity, so a fixed chase eye expressed in the rig frame (RDF: up is
+        # -y, behind is -z) rides the rig as its world transform updates.
+        follow_view = rrb.Spatial3DView(
+            name="Follow",
+            origin="world/rig",
+            contents=contents_3d,
+            eye_controls=rrb.EyeControls3D(
+                kind=rrb.Eye3DKind.Orbital,
+                position=(0.0, -1.2, -2.5),
+                look_target=(0.0, 0.0, 1.5),
+                eye_up=(0.0, -1.0, 0.0),
+                spin_speed=0.0,
+            ),
+        )
         return rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(origin="/", name="3D map", contents=contents_3d, eye_controls=eye_controls),
+                rrb.Vertical(
+                    rrb.Spatial3DView(origin="/", name="3D map", contents=contents_3d, eye_controls=eye_controls),
+                    follow_view,
+                    row_shares=[3.0, 2.0],
+                ),
                 rrb.Vertical(
                     rrb.Horizontal(*compare_views, name="render vs GT"),
                     rrb.Horizontal(*image_views),
