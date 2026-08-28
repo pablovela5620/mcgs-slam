@@ -116,9 +116,10 @@ outputs = [".pixi-cache/metric3d.stamp"]
 
 # ── Demo ────────────────────────────────────────────────────────────────────
 [tasks.demo]
-cmd = "python demo.py --calib calib/100613.yml --imagedir data/100613/front data/100613/front_right data/100613/front_left data/100613/front_right --stride 1 --output output/100613 --rrd output/100613/mcgs_slam.rrd"
+# Spawns a live Rerun viewer when a display is available; always writes the .rrd.
+cmd = "python demo.py --calib calib/100613.yml --imagedir data/100613/front data/100613/front_right data/100613/front_left data/100613/front_right --stride 1 --output output/100613 --rrd output/100613/mcgs_slam.rrd --rerun-spawn"
 depends-on = ["build", "_download-data", "_fetch-metric3d"]
-description = "Run MCGS-SLAM on the example sequence, logging to a Rerun .rrd"
+description = "Run MCGS-SLAM on the example sequence: live Rerun viewer + .rrd recording"
 
 [tasks.ate]
 cmd = "evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as"

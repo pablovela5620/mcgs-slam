@@ -122,10 +122,18 @@ class RerunLogger:
         if save_path is not None:
             sinks.append(rr.FileSink(save_path))
         if spawn:
-            rr.spawn(connect=False, memory_limit="8GB")
-            sinks.append(rr.GrpcSink())
+            # Headless hosts (SSH, CI) can't open a viewer window; degrade to
+            # the recording instead of crashing so `pixi run demo` works everywhere.
+            if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+                try:
+                    rr.spawn(connect=False, memory_limit="8GB")
+                    sinks.append(rr.GrpcSink())
+                except Exception as exc:  # noqa: BLE001 — any spawn failure degrades the same way
+                    print(f"[rerun] could not spawn a live viewer ({exc}); writing the recording only")
+            else:
+                print("[rerun] no display detected; skipping the live viewer (recording still written)")
         if not sinks:
-            raise ValueError("RerunLogger needs a .rrd path and/or a spawned viewer (--rrd / --rerun-spawn)")
+            raise ValueError("no Rerun sink available: pass --rrd, or use --rerun-spawn on a host with a display")
         rr.set_sinks(*sinks)
         rr.send_blueprint(self._blueprint())
         rr.log("/", rr.ViewCoordinates.RDF, static=True)

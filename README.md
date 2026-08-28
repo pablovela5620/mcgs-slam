@@ -34,8 +34,9 @@ The only host requirement is an NVIDIA driver >= 580.
 ```bash
 curl -fsSL https://pixi.sh/install.sh | bash   # if pixi is not installed
 pixi run demo                                  # installs env, builds CUDA extensions,
-                                               # downloads data + models, runs SLAM,
-                                               # and writes a Rerun recording
+                                               # downloads data + models, runs SLAM
+                                               # in a live Rerun viewer, and writes
+                                               # a Rerun recording
 ```
 
 Individual steps, if you want them separately:
@@ -85,12 +86,14 @@ In addition, Multi-Camera Airsim (MC-Airsim) Dataset is available from [https://
 
 ## 🚀 Run MCGS-SLAM
 
-### With a Rerun recording (default)
+### One command (default)
 
 ```bash
-pixi run demo                # writes output/100613/mcgs_slam.rrd
-pixi run demo --rerun-spawn  # same run with a live Rerun viewer
+pixi run demo   # live Rerun viewer + output/100613/mcgs_slam.rrd
 ```
+
+On a headless host (SSH, CI) the live viewer is skipped automatically and
+the recording is still written.
 
 The Rerun recording contains the multi-camera rig (frustums + images), the
 per-keyframe estimated depth, the rig trajectory, and Gaussian-map snapshots
