@@ -46,7 +46,7 @@ pixi run build      # compile droid_backends, lietorch, simple-knn, diff-gaussia
 ```
 
 The CUDA extensions are compiled for the arch in `TORCH_CUDA_ARCH_LIST`
-(`12.1` on linux-aarch64 for the GB10, `8.9;12.0` on linux-64 — see
+(`12.1` on linux-aarch64 for the GB10, `8.6;8.9;12.0` on linux-64 — see
 `pixi.toml`).
 
 <details>
