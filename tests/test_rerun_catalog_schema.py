@@ -206,6 +206,7 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
         for query in query_group
     ]
     for camera_id in (0, 1, 4, 5):
+        assert f"- world/rig_00/cam_{camera_id:02d}/pinhole" in view_queries
         assert (
             f"- world/rig_00/cam_{camera_id:02d}/rectified/image" in view_queries
         )

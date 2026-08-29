@@ -129,6 +129,7 @@ class CatalogRerunLogger(RerunLogger):
         ]
         contents_3d: list[str] = (
             ["+ /**"]
+            + [f"- {self._pinhole_path(index)}" for index in range(len(self.cam_names))]
             + [f"- {self._video_path(index)}" for index in range(len(self.cam_names))]
             + [f"- {self._image_path(index)}" for index in range(len(self.cam_names))]
             + [f"- {self._depth_path(index)}" for index in range(len(self.cam_names))]
