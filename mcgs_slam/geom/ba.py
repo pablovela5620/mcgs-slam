@@ -27,13 +27,13 @@ def pose_retr(poses, dx, ii):
     ii = ii.to(device=dx.device)
     return poses.retr(scatter_sum(dx, ii, dim=1, dim_size=poses.shape[1]))
 
-def construct_joint_BA(targets, weights, etas, iis, jjs, poses, disps_list, intrs, base, T_ci_c0, t0, D=6):
+def construct_joint_BA(targets, weights, etas, iis, jjs, poses, disps_list, intrs, T_ci_c0, t0, D=6):
     Es, Cs, ws = [], [], []
     for i in range(len(targets)):
         if i == 0:
-            H, E, C, v, w, chi2, chi2R = BA_prepare(targets[i], weights[i], etas[i], poses, disps_list[i], intrs[:,:,[0,1]], base, iis[i], jjs[i], T_ci_c0[i], fixedp=t0, D=D)
+            H, E, C, v, w, chi2, chi2R = BA_prepare(targets[i], weights[i], etas[i], poses, disps_list[i], intrs[:, :, i], iis[i], jjs[i], T_ci_c0[i], fixedp=t0, D=D)
         else:
-            E, C, w, chi2, chi2R = BA_prepare(targets[i], weights[i], etas[i], poses, disps_list[i], intrs[:,:,[i+1]], base, iis[i], jjs[i], T_ci_c0[i], H, v, fixedp=t0, D=D)
+            E, C, w, chi2, chi2R = BA_prepare(targets[i], weights[i], etas[i], poses, disps_list[i], intrs[:, :, i], iis[i], jjs[i], T_ci_c0[i], H, v, fixedp=t0, D=D)
         Es.append(E)
         Cs.append(C)
         ws.append(w)
@@ -43,7 +43,7 @@ def construct_joint_BA(targets, weights, etas, iis, jjs, poses, disps_list, intr
     w = torch.cat(ws, dim=1)
     return H, E, C, v, w
 
-def BA_prepare(target, weight, eta, poses, disps, intrinsics, base, ii, jj, T_ci_c0=None,
+def BA_prepare(target, weight, eta, poses, disps, intrinsics, ii, jj, T_ci_c0=None,
                H=None, v=None, fixedp=1, D=6):
     """ Construct linear system for Full Bundle Adjustment """
 
@@ -55,7 +55,7 @@ def BA_prepare(target, weight, eta, poses, disps, intrinsics, base, ii, jj, T_ci
 
     ### 1: commpute jacobians and residuals ###
     coords, valid, (Ji, Jj, Jz) = pops.projective_transform(
-        poses, disps, intrinsics, base, ii, jj, jacobian=True, Tcb=T_ci_c0)
+        poses, disps, intrinsics, ii, jj, jacobian=True, Tcb=T_ci_c0)
 
     r = (target - coords).view(B, N, -1, 1)
     rw = .001 * (valid * weight).view(B, N, -1, 1)
@@ -162,7 +162,7 @@ def BA_solve(poses, disps, disps2, disps3, ii, jj, H, E, C, v, w, fixedp=1):
         return poses, disps, disps2, disps3
     return poses, disps
 
-def BA(target, weight, eta, poses, disps, intrinsics, base, ii, jj, fixedp=1):
+def BA(target, weight, eta, poses, disps, intrinsics, ii, jj, fixedp=1):
     """ Full Bundle Adjustment """
 
     B, P, ht, wd = disps.shape
@@ -171,14 +171,10 @@ def BA(target, weight, eta, poses, disps, intrinsics, base, ii, jj, fixedp=1):
 
     ### 1: commpute jacobians and residuals ###
     coords, valid, (Ji, Jj, Jz) = pops.projective_transform(
-        poses, disps, intrinsics, base, ii, jj, jacobian=True)
+        poses, disps, intrinsics, ii, jj, jacobian=True)
 
     r = (target - coords).view(B, N, -1, 1)
     w = .001 * (valid * weight).view(B, N, -1, 1)
-    # print("- - residual1", torch.sum(ii==jj), torch.sum(ii!=jj))
-    # print("- - - residual1", torch.sum(w[:,ii==jj]), torch.sum(torch.abs(r)[:,ii==jj])/torch.sum(ii==jj), torch.sum(torch.abs(w*r)[:,ii==jj]))
-    # print("- - - residual2", torch.sum(w[:,ii!=jj]), torch.sum(torch.abs(r)[:,ii!=jj])/torch.sum(ii!=jj), torch.sum(torch.abs(w*r)[:,ii!=jj]))
-
     ### 2: construct linear system ###
     Ji = Ji.reshape(B, N, -1, D)
     Jj = Jj.reshape(B, N, -1, D)
@@ -243,7 +239,7 @@ def BA(target, weight, eta, poses, disps, intrinsics, base, ii, jj, fixedp=1):
     return poses, disps
 
 
-def MoBA(target, weight, eta, poses, disps, intrinsics, base, ii, jj, fixedp=1, rig=1):
+def MoBA(target, weight, eta, poses, disps, intrinsics, ii, jj, fixedp=1, rig=1):
     """ Motion only bundle adjustment """
 
     B, P, ht, wd = disps.shape
@@ -252,7 +248,7 @@ def MoBA(target, weight, eta, poses, disps, intrinsics, base, ii, jj, fixedp=1, 
 
     ### 1: commpute jacobians and residuals ###
     coords, valid, (Ji, Jj, Jz) = pops.projective_transform(
-        poses, disps, intrinsics, base, ii, jj, jacobian=True)
+        poses, disps, intrinsics, ii, jj, jacobian=True)
 
     r = (target - coords).view(B, N, -1, 1)
     w = .001 * (valid * weight).view(B, N, -1, 1)
@@ -306,7 +302,7 @@ def get_prior_depth_aligned(depth_prior, scales):
 def JDSA(target, weight, eta, poses, disps, intrinsics, disps_prior, dscales, ii, jj, alpha):
     
     # TODO
-    intrinsics = intrinsics[:, :4]
+    intrinsics = intrinsics[..., :4].contiguous()
 
     B, P, ht, wd = disps.shape
     N = ii.shape[0]

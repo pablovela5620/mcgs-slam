@@ -7,7 +7,6 @@ sys.path.append(os.path.join(_ROOT, 'mcgs_slam'))   # nopep8
 sys.path.append(os.path.join(_ROOT, 'thirdparty/lietorch'))   # nopep8
 sys.path.append(os.path.join(_ROOT, 'thirdparty/simple-knn'))   # nopep8
 sys.path.append(os.path.join(_ROOT, 'thirdparty/diff-gaussian-rasterization'))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'thirdparty/mmcv-shim'))   # for Metric3D via torch.hub  # nopep8
 
 import cv2
 import time
@@ -39,10 +38,13 @@ if __name__ == '__main__':
     os.makedirs(args.output, exist_ok=True)
 
     torch.multiprocessing.set_start_method('spawn')
+    # The stream runs on the main thread next to torch's OpenMP pool; letting cv2
+    # spawn its own pool per call oversubscribes the cores (measured ~2x slower).
+    cv2.setNumThreads(1)
 
     rr_logger = None
     if args.rrd or args.rerun_spawn:
-        rr_logger = RerunLogger(args.imagedir, args.stream_indices, scale_factor=SCALE_FACTOR,
+        rr_logger = RerunLogger(args.imagedir, scale_factor=SCALE_FACTOR,
                                 save_path=args.rrd, spawn=args.rerun_spawn,
                                 splat_every=args.rr_splat_every)
 

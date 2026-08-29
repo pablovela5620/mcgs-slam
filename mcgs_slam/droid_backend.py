@@ -19,16 +19,12 @@ class DroidBackend:
         self.backend_thresh = args.backend_thresh
         self.backend_radius = args.backend_radius
         self.backend_nms = args.backend_nms
-        self.need_normalize = not self.video.stereo and not args.posefile and not "depthdir" in args.__dict__
         
     @torch.no_grad()
     def __call__(self, steps=12):
         """ main update """
 
         t = self.video.counter.value
-        if self.need_normalize:
-             self.video.normalize()
-
         graph = FactorGraph(self.video, self.update_op, corr_impl="alt", max_factors=5000)
 
         graph.add_proximity_factors(rad=self.backend_radius,

@@ -149,19 +149,18 @@ def visualization(video, device="cuda:0"):
                 count = droid_backends.depth_filter(posesall, dispsall, intrinsics, dirty_index, thresh)
                 masks = ((count >= visualization.count) & (disps > .5*disps.mean(dim=[1,2], keepdim=True)))
                 return points, masks
-            points, masks = process_one(poses, disps, video.poses, video.disps, video.intrinsics[0, 0])
+            points, masks = process_one(poses, disps, video.poses, video.disps, video.K_row(0).squeeze(0))
 
-            if video.multi:
-                masks_multi, points_multi, images_multi = [], [], []
-                for ix in range(1, video.multi-1):
-                    imagesi = torch.index_select(video.images_list[ix], 0, dirty_index.cpu())
-                    images_multi.append(imagesi[:,[2,1,0]].permute(0,2,3,1) / 255.0)
-                    posesiall = (video.T_ci_c0[ix] * SE3(video.poses[None])).data[0]
-                    posesi = torch.index_select(posesiall, 0, dirty_index)
-                    dispsi = torch.index_select(video.disps_list[ix], 0, dirty_index)
-                    pointsi, masksi = process_one(posesi, dispsi, posesiall, video.disps_list[ix], video.intrinsics[0, ix+1])
-                    points_multi.append(pointsi)
-                    masks_multi.append(masksi)
+            masks_multi, points_multi, images_multi = [], [], []
+            for ix in range(1, video.multi):
+                imagesi = torch.index_select(video.images_list[ix], 0, dirty_index.cpu())
+                images_multi.append(imagesi[:,[2,1,0]].permute(0,2,3,1) / 255.0)
+                posesiall = (video.T_ci_c0[ix] * SE3(video.poses[None])).data[0]
+                posesi = torch.index_select(posesiall, 0, dirty_index)
+                dispsi = torch.index_select(video.disps_list[ix], 0, dirty_index)
+                pointsi, masksi = process_one(posesi, dispsi, posesiall, video.disps_list[ix], video.K_row(ix).squeeze(0))
+                points_multi.append(pointsi)
+                masks_multi.append(masksi)
 
             for i in range(len(dirty_index)):
                 pose = Ps[i]
@@ -193,9 +192,8 @@ def visualization(video, device="cuda:0"):
                     return create_point_actor(pts, clr)
 
                 point_actor = add(masks, points, images)
-                if video.multi:
-                    for ix in range(video.multi-2):
-                        point_actor += add(masks_multi[ix], points_multi[ix], images_multi[ix])
+                for ix in range(len(masks_multi)):
+                    point_actor += add(masks_multi[ix], points_multi[ix], images_multi[ix])
 
                 ## add point actor ###
                 vis.add_geometry(point_actor)

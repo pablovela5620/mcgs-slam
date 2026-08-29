@@ -2,7 +2,9 @@ import os
 import cv2
 import torch
 import lietorch
+from prior_mask import mask_invalid_depth
 import numpy as np
+from typing import TypedDict
 
 from droid_net import DroidNet
 from depth_video import DepthVideo
@@ -21,6 +23,21 @@ from utils.utils import load_config
 # world. Consumed by the GS packets and the Rerun logger — keep single-sourced.
 SCALE_FACTOR = 0.2
 
+
+class CameraPacket(TypedDict):
+    """One camera's tracking data passed to the Gaussian backend."""
+
+    viz_idx: torch.Tensor
+    tstamp: torch.Tensor
+    poses: torch.Tensor
+    images: torch.Tensor
+    normals: torch.Tensor
+    depths: torch.Tensor
+    intrinsics: torch.Tensor
+    cam_idx: int
+    pose_updates: torch.Tensor | lietorch.SE3 | None
+    scale_updates: torch.Tensor | None
+
 class Mcgs:
     def __init__(self, args, video=None, rr_logger=None):
         super(Mcgs, self).__init__()
@@ -32,7 +49,7 @@ class Mcgs:
 
         # store images, depth, poses, intrinsics (shared between processes)
         if video is None:
-            self.video = DepthVideo(args, args.image_size, args.buffer, stereo=args.stereo)
+            self.video = DepthVideo(args, args.image_size, args.buffer)
         else:
             self.video = video
 
@@ -74,42 +91,39 @@ class Mcgs:
         scaled_poses[:, :3] *= scale_factor
         return scaled_poses
 
+    def _camera_packet(
+        self,
+        viz_idx: torch.Tensor,
+        cam_idx: int,
+        dposes: torch.Tensor | lietorch.SE3 | None,
+        dscales: torch.Tensor | None,
+    ) -> CameraPacket:
+        """Build the canonical Gaussian-backend packet for one rig camera."""
+        poses_c0_w = lietorch.SE3(self.video.poses[viz_idx].to(device="cpu")[None])
+        poses_ci_w = (self.video.T_ci_c0[cam_idx].cpu() * poses_c0_w).data[0]
+        return {
+            "viz_idx": viz_idx.to(device="cpu"),
+            "tstamp": self.video.tstamp[viz_idx].to(device="cpu") + 500 * cam_idx,
+            "poses": self._scale_poses(poses_ci_w, scale_factor=self.scale_factor),
+            "images": self.video.images_up_list[cam_idx][viz_idx.cpu()],
+            "normals": self.video.normals_list[cam_idx][viz_idx.cpu()],
+            "depths": mask_invalid_depth(
+                self.scale_factor / self.video.disps_up_list[cam_idx][viz_idx.cpu()].to(device="cpu"),
+                self.video.normals_list[cam_idx][viz_idx.cpu()],
+            ),
+            "intrinsics": self.video.K(cam_idx)[0, viz_idx].to(device="cpu")[:, :4] * 8,
+            "cam_idx": cam_idx,
+            "pose_updates": dposes.to(device="cpu") if dposes is not None else None,
+            "scale_updates": dscales.to(device="cpu") if dscales is not None else None,
+        }
+
     def call_gs(self, viz_idx, dposes=None, dscale=None):
 
         if self.rr is not None:
             self.rr.log_keyframe(self.video, viz_idx)
 
-        data = {'viz_idx':  viz_idx.to(device='cpu'),
-                'tstamp':   self.video.tstamp[viz_idx].to(device='cpu'),
-                'poses':    self._scale_poses(self.video.poses[viz_idx].to(device='cpu'), scale_factor = self.scale_factor),
-                'images':   self.video.images_up[viz_idx.cpu()],
-                'normals':  self.video.normals[viz_idx.cpu()],
-                'depths':   self.scale_factor / self.video.disps_up[viz_idx.cpu()].to(device='cpu'),
-                'intrinsics':   self.video.intrinsics[viz_idx].to(device='cpu')[:, 0, :4] * 8,
-                'cam_idx':  0,
-                'pose_updates':  dposes.to(device='cpu') if dposes is not None else None,
-                'scale_updates': dscale.to(device='cpu') if dscale is not None else None}
-
-        self.gs.process_track_data(data)
-        
-        if self.video.multi:
-            for i in range(1, self.video.multi-1):
-                
-                T_ci_c0 = self.video.T_ci_c0[i]
-                
-                data = {'viz_idx':  viz_idx.to(device='cpu'),
-                        'tstamp':   self.video.tstamp[viz_idx].to(device='cpu') + 500 * i,
-                        'poses':    self._scale_poses((T_ci_c0.cpu() * lietorch.SE3(self.video.poses[viz_idx].to(device='cpu')[None])).data[0],
-                                                        scale_factor = self.scale_factor),
-                        'images':   self.video.images_up_list[i][viz_idx.cpu()],
-                        'normals':  self.video.normals_list[i][viz_idx.cpu()],
-                        'depths':   self.scale_factor / self.video.disps_up_list[i][viz_idx.cpu()].to(device='cpu'),
-                        'intrinsics':   self.video.intrinsics[viz_idx].to(device='cpu')[:, i + 1, :4] * 8,
-                        'cam_idx':  i,
-                        'pose_updates':  dposes.to(device='cpu') if dposes is not None else None,
-                        'scale_updates': dscale.to(device='cpu') if dscale is not None else None}
-
-                self.gs.process_track_data(data)
+        for cam_idx in range(self.video.multi):
+            self.gs.process_track_data(self._camera_packet(viz_idx, cam_idx, dposes, dscale))
 
         # One splat snapshot per keyframe update (cadence inside the logger),
         # after every camera's packet has refined the map.
@@ -121,48 +135,25 @@ class Mcgs:
         if self.rr is not None:
             self.rr.log_keyframe(self.video, viz_idx)
 
-        multi_cam_data = {
-            'viz_idx': [],
-            'tstamp': [],
-            'poses': [],
-            'images': [],
-            'normals': [],
-            'depths': [],
-            'intrinsics': []
-        }
-
-        multi_cam_data['viz_idx'].append(viz_idx.to(device='cpu'))
-        multi_cam_data['tstamp'].append(self.video.tstamp[viz_idx].to(device='cpu'))
-        multi_cam_data['poses'].append(
-            self._scale_poses(self.video.poses[viz_idx].to(device='cpu'), scale_factor = self.scale_factor)
+        packets: list[CameraPacket] = [
+            self._camera_packet(viz_idx, cam_idx, dposes, dscale)
+            for cam_idx in range(self.video.multi)
+        ]
+        tensor_keys: tuple[str, ...] = (
+            "viz_idx", "tstamp", "poses", "images", "normals", "depths", "intrinsics"
         )
-        multi_cam_data['images'].append(self.video.images_up[viz_idx.cpu()])
-        multi_cam_data['normals'].append(self.video.normals[viz_idx.cpu()])
-        multi_cam_data['depths'].append(self.scale_factor / self.video.disps_up[viz_idx.cpu()].to(device='cpu'))
-        multi_cam_data['intrinsics'].append(self.video.intrinsics[viz_idx].to(device='cpu')[:, 0, :4] * 8)
-
-        if self.video.multi:
-            for i in range(1, self.video.multi - 1):
-                T_ci_c0 = self.video.T_ci_c0[i]
-
-                multi_cam_data['viz_idx'].append(viz_idx.to(device='cpu'))
-                multi_cam_data['tstamp'].append(self.video.tstamp[viz_idx].to(device='cpu') + 500 * i)
-                multi_cam_data['poses'].append(self._scale_poses((T_ci_c0.cpu() * lietorch.SE3(self.video.poses[viz_idx].to(device='cpu')[None])).data[0], 
-                                                        scale_factor = self.scale_factor))
-                multi_cam_data['images'].append(self.video.images_up_list[i][viz_idx.cpu()])
-                multi_cam_data['normals'].append(self.video.normals_list[i][viz_idx.cpu()])
-                multi_cam_data['depths'].append(self.scale_factor / self.video.disps_up_list[i][viz_idx.cpu()].to(device='cpu'))
-                multi_cam_data['intrinsics'].append(self.video.intrinsics[viz_idx].to(device='cpu')[:, i + 1, :4] * 8)
-                
-        final_data = {
-            k: torch.cat(v, dim=0) if isinstance(v[0], torch.Tensor) else v
-            for k, v in multi_cam_data.items()
+        final_data: dict[str, object] = {
+            key: torch.cat([packet[key] for packet in packets], dim=0)
+            for key in tensor_keys
         }
-        
+        final_data["cam_idx"] = torch.cat([
+            torch.full_like(packet["viz_idx"], packet["cam_idx"], dtype=torch.long)
+            for packet in packets
+        ])
         final_data['pose_updates'] = lietorch.SE3(self._scale_poses(dposes.to(device='cpu').data, self.scale_factor)) if dposes is not None else None
         final_data['scale_updates'] = dscale.to(device='cpu') if dscale is not None else None
             
-        self.gs.process_global_track_data(final_data, self.video.multi - 1)
+        self.gs.process_global_track_data(final_data, self.video.multi)
 
         if self.rr is not None:
             self.rr.log_gaussians(self.gs.gaussians, force=True)

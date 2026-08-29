@@ -1,5 +1,7 @@
 import random
 import time
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -20,6 +22,38 @@ try:
 except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
     gui_utils = slam_gui = None
 
+
+@dataclass(slots=True)
+class CameraProjection:
+    """Pinhole calibration and projection matrix for one camera."""
+
+    K: list[float | int]
+    """Camera parameters ``[fx, fy, cx, cy, width, height]``."""
+    matrix: torch.Tensor
+    """Transposed 4x4 projection matrix on the requested device."""
+
+
+def build_camera_projection(
+    intrinsics: torch.Tensor,
+    image_hw: tuple[int, int],
+    device: str = "cuda",
+) -> CameraProjection:
+    """Build one camera's projection from pixel intrinsics and image size."""
+    height, width = image_hw
+    fx, fy, cx, cy = (float(value) for value in intrinsics[:4])
+    K: list[float | int] = [fx, fy, cx, cy, width, height]
+    matrix = getProjectionMatrix2(
+        znear=0.01,
+        zfar=100.0,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        W=width,
+        H=height,
+    ).transpose(0, 1).to(device=device)
+    return CameraProjection(K=K, matrix=matrix)
+
 class GSBackEnd(mp.Process):
     def __init__(self, config, save_dir, use_gui=False, rr_logger=None):
         super().__init__()
@@ -32,6 +66,7 @@ class GSBackEnd(mp.Process):
         self.initialized = False
         self.save_dir = save_dir
         self.use_gui = use_gui
+        self.camera_projections: dict[int, CameraProjection] = {}
 
         if self.use_gui and gui_utils is None:
             raise RuntimeError("--gsvis requires glfw/imgviz/PyOpenGL, which are not in the pixi env")
@@ -83,19 +118,27 @@ class GSBackEnd(mp.Process):
                 render_pkg = render(vp, self.gaussians, self.background)
                 self.rr.log_render_comparison(cam_idx, render_pkg["render"], vp.original_image)
 
-    def process_track_data(self, packet):
-        if not hasattr(self, "projection_matrix"):
-            H, W = packet["images"].shape[-2:]
-            self.K = K = list(packet["intrinsics"][0]) + [W, H]
-            self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
+    def _projection_for_camera(
+        self,
+        cam_idx: int,
+        intrinsics: torch.Tensor,
+        image_hw: tuple[int, int],
+    ) -> CameraProjection:
+        """Return the cached projection for one camera, building it on first use."""
+        if cam_idx not in self.camera_projections:
+            self.camera_projections[cam_idx] = build_camera_projection(intrinsics, image_hw)
+        return self.camera_projections[cam_idx]
 
-        cam_idx = packet.get('cam_idx', 0)
+    def process_track_data(self, packet):
+        H, W = packet["images"].shape[-2:]
+        cam_idx = int(packet.get('cam_idx', 0))
+        projection = self._projection_for_camera(cam_idx, packet["intrinsics"][0], (H, W))
         w2c = SE3(packet["poses"]).matrix().cuda()
         for i, idx in enumerate(packet['viz_idx']):
             idx = idx.item()
             idx = packet['tstamp'][i].item()
             tstamp = packet['tstamp'][i].item()
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, projection.matrix, projection.K, tstamp, cam_idx=cam_idx)
             if idx not in self.current_window:
                 self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
                 if not self.initialized:
@@ -130,11 +173,6 @@ class GSBackEnd(mp.Process):
                     gtdepth=viewpoint.depth.numpy()))
 
     def process_global_track_data(self, packet, cam_num):
-        if not hasattr(self, "projection_matrix"):
-            H, W = packet["images"].shape[-2:]
-            self.K = K = list(packet["intrinsics"][0]) + [W, H]
-            self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
-
         if packet['pose_updates'] is not None:
             with torch.no_grad():
                 tstamps = packet['tstamp']
@@ -154,16 +192,15 @@ class GSBackEnd(mp.Process):
                 rot = SO3(updates.data[:,3:]) * rot
                 self.gaussians._rotation[:] = rot.data
 
-        # packet stacks all cameras in order [cam0 frames, cam1 frames, ...],
-        # so the camera index of frame i is i // n_per_cam.
-        n_per_cam = max(1, len(packet['viz_idx']) // cam_num)
+        H, W = packet["images"].shape[-2:]
         w2c = SE3(packet["poses"]).matrix().cuda()
         for i, idx in enumerate(packet['viz_idx']):
             idx = idx.item()
             idx = packet['tstamp'][i].item()
             tstamp = packet['tstamp'][i].item()
-            cam_idx = i // n_per_cam
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
+            cam_idx = int(packet["cam_idx"][i])
+            projection = self._projection_for_camera(cam_idx, packet["intrinsics"][i], (H, W))
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, projection.matrix, projection.K, tstamp, cam_idx=cam_idx)
             if idx not in self.current_window:
                 self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
                 if not self.initialized:
@@ -217,9 +254,10 @@ class GSBackEnd(mp.Process):
         return np.stack(poses_cw)
 
     @torch.no_grad()
-    def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx):
+    def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx, cam_idx=0):
+        projection = self.camera_projections[cam_idx]
         eval_rendering(gtimages, gtdepthdir, traj, self.gaussians,self.save_dir, self.background,
-            self.projection_matrix, self.K, kf_idx, iteration="after_opt")
+            projection.matrix, projection.K, kf_idx, iteration="after_opt")
     
     def eval_rendering_kf(self):
         eval_rendering_kf(self.viewpoints, self.gaussians, self.save_dir, self.background, iteration="after_opt")

@@ -22,7 +22,7 @@ Timelines: ``frame`` (input frame index), ``time`` (image timestamps, seconds)
 and ``refine_iter`` (final color-refinement iterations).
 """
 
-import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -35,6 +35,7 @@ from lietorch import SE3
 from torch import Tensor
 
 from gaussian.utils.sh_utils import SH2RGB
+from prior_mask import prior_valid
 
 if TYPE_CHECKING:
     from depth_video import DepthVideo
@@ -73,23 +74,19 @@ class RerunLogger:
     def __init__(
         self,
         imagedirs: list[str],
-        stream_indices: list[int],
         scale_factor: float,
         save_path: str | None = None,
         spawn: bool = False,
         splat_every: int = 10,
         splat_cap: int = 75_000,
         max_splat_scale: float = 8.0,
+        splat_scale_percentile: float = 99.7,
         max_depth: float = 60.0,
         refine_every: int = 10_000,
     ) -> None:
         """
         Args:
-            imagedirs: the raw input image directories, in stream order.
-            stream_indices: for each logged camera (VIDEO order — the pipeline
-                drops input dir 1, the stereo-right duplicate), its column in
-                the raw input stream, e.g. [0, 2, 3]. Camera names are derived
-                from the corresponding imagedirs.
+            imagedirs: the input image directories, in camera order.
             scale_factor: pose scale used by the Gaussian backend (0.2).
             save_path: write a .rrd recording here.
             spawn: also stream to a spawned live viewer.
@@ -98,16 +95,17 @@ class RerunLogger:
                 (the final map is always logged in full).
             max_splat_scale: drop splats whose largest axis exceeds this (scaled
                 world units); culls the degenerate spike floaters, not the map.
+            splat_scale_percentile: also drop splats above this percentile of largest axis.
             max_depth: estimated depth beyond this (in scaled world units) is
                 logged as 0 (invalid) instead of saturating the colormap.
             refine_every: snapshot cadence (iterations) during color refinement.
         """
-        self.cam_names = [os.path.basename(os.path.normpath(imagedirs[i])) for i in stream_indices]
-        self.stream_indices = stream_indices
+        self.cam_names = [Path(imagedir).name for imagedir in imagedirs]
         self.scale = scale_factor
         self.splat_every = splat_every
         self.splat_cap = splat_cap
         self.max_splat_scale = max_splat_scale
+        self.splat_scale_percentile = splat_scale_percentile
         self.max_depth = max_depth
         self.refine_every = refine_every
         self._kf_updates: int = 0
@@ -220,7 +218,7 @@ class RerunLogger:
             self._calibrated = True
 
         for i in range(len(self.cam_names)):
-            image_hw3: UInt8[np.ndarray, "h w 3"] = rearrange(images_bgr[self.stream_indices[i]].numpy(), "c h w -> h w c")
+            image_hw3: UInt8[np.ndarray, "h w 3"] = rearrange(images_bgr[i].numpy(), "c h w -> h w c")
             rr.log(
                 f"{self._cam_path(i)}/pinhole/image",
                 rr.Image(image_hw3, color_model=rr.ColorModel.BGR).compress(jpeg_quality=75),
@@ -236,7 +234,7 @@ class RerunLogger:
                 rr.Transform3D(translation=translations[i], quaternion=rr.Quaternion(xyzw=quats_xyzw[i])),
                 static=True,
             )
-            fx, fy, cx, cy = (float(v) for v in intrinsics[self.stream_indices[i], :4])
+            fx, fy, cx, cy = (float(v) for v in intrinsics[i, :4])
             rr.log(
                 f"{self._cam_path(i)}/pinhole",
                 rr.Pinhole(
@@ -269,10 +267,11 @@ class RerunLogger:
         self._traj_centers = centers
         rr.log("world/trajectory", rr.LineStrips3D([centers], colors=[[0, 200, 255]], radii=0.01))
 
-        disps_up_list = video.disps_up_list if video.multi else [video.disps_up]
+        disps_up_list = video.disps_up_list
         for i in range(len(self.cam_names)):
             disp_hw: Float[Tensor, "h w"] = disps_up_list[i][idx].detach().cpu()
-            valid_hw = (disp_hw > 0) & (self.scale < self.max_depth * disp_hw)
+            prior_ok_hw = prior_valid(video.normals_list[i][idx][None].cpu())[0]
+            valid_hw = (disp_hw > 0) & (self.scale < self.max_depth * disp_hw) & prior_ok_hw
             depth_hw: Float[Tensor, "h w"] = torch.where(valid_hw, self.scale / disp_hw.clamp(min=1e-6), torch.zeros(()))
             depth_mm_u16: np.ndarray = (depth_hw[::2, ::2].numpy() * 1000.0).clip(0, 65535).astype(np.uint16)
             rr.log(f"{self._cam_path(i)}/pinhole/depth", rr.DepthImage(depth_mm_u16, meter=1000.0))
@@ -298,7 +297,12 @@ class RerunLogger:
                 gaussians.get_features[:, 0, :].detach().cpu().numpy().astype(np.float32)
             )
 
-        keep: np.ndarray = np.flatnonzero(scales.max(axis=1) < self.max_splat_scale)
+        # Drop the few giant sky/far splats: they are ~0.2 % of the map but hide
+        # everything in a 3D view. The percentile cap is scale-free; the absolute
+        # cap stays as a backstop for degenerate maps.
+        largest_axis: np.ndarray = scales.max(axis=1)
+        cap_scale: float = min(self.max_splat_scale, float(np.percentile(largest_axis, self.splat_scale_percentile)))
+        keep: np.ndarray = np.flatnonzero(largest_axis < cap_scale)
         if keep.size == 0:
             return
         if cap and keep.size > self.splat_cap:

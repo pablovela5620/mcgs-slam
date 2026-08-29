@@ -57,17 +57,19 @@ ninja = ">=1.11"
 # setup.py install was removed in setuptools 80; the CUDA extension builds use it.
 setuptools = "<80"
 wheel = "*"
+pytest = ">=9.1.1,<10"
 
 [pypi-dependencies]
 # PyPI torch wheels bundle the CUDA 13.0 runtime; host only needs a driver.
 torch = "==2.13.0"
 torchvision = "==0.28.0"
 torchmetrics = ">=1.4"
-# Metric3D (torch.hub) uses mmengine's Config when mmcv is absent, and timm for its backbones.
-mmengine = ">=0.10"
-timm = ">=1.0"
 # Trajectory evaluation (evo_ape) against the dataset's ground-truth poses.
 evo = ">=1.28"
+# MoGe-2 prior (vendored, pinned) from the rerun examples monorepo; sam3 is its
+# sibling package that monopriors declares as a dependency.
+sam3 = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "ab4f8441d21388667f2f3a825f2a533f203444b2", subdirectory = "packages/sam3" }
+monopriors = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "ab4f8441d21388667f2f3a825f2a533f203444b2", subdirectory = "packages/monoprior" }
 
 # ── CUDA extension builds (setuptools build_ext, no pip; .so files land in-tree) ──
 [tasks._build-droid-lietorch]
@@ -107,18 +109,21 @@ cmd = "test -f data/100613/gt_poses.txt || (tmp=$(mktemp --suffix=.zip) && wget 
 description = "Download the example Waymo sequence (100613)"
 outputs = ["data/100613/gt_poses.txt"]
 
-[tasks._fetch-metric3d]
-cmd = "python -c \"import torch; torch.hub.load('yvanyin/metric3d', 'metric3d_vit_small', pretrain=True, trust_repo=True)\" && mkdir -p .pixi-cache && touch .pixi-cache/metric3d.stamp"
-description = "Pre-fetch the Metric3D ViT-small prior model via torch.hub"
-# Metric3D imports the vendored mmcv stub.
-env = { PYTHONPATH = "thirdparty/mmcv-shim" }
-outputs = [".pixi-cache/metric3d.stamp"]
+[tasks._fetch-prior]
+cmd = "python -c \"import sys; sys.path.append('mcgs_slam'); from prior import MoGePrior; print(MoGePrior.fetch('vits'))\" && mkdir -p .pixi-cache && touch .pixi-cache/moge-vits.stamp"
+description = "Pre-fetch the pinned MoGe-2 ViT-S depth+normal prior checkpoint"
+outputs = [".pixi-cache/moge-vits.stamp"]
 
 # ── Demo ────────────────────────────────────────────────────────────────────
 [tasks.demo]
-cmd = "python demo.py --calib calib/100613.yml --imagedir data/100613/front data/100613/front_right data/100613/front_left data/100613/front_right --stride 1 --output output/100613 --rrd output/100613/mcgs_slam.rrd"
-depends-on = ["build", "_download-data", "_fetch-metric3d"]
+cmd = "python demo.py --calib calib/100613.yml --imagedir data/100613/front data/100613/front_left data/100613/front_right --stride 1 --output output/100613 --rrd output/100613/mcgs_slam.rrd"
+depends-on = ["build", "_download-data", "_fetch-prior"]
 description = "Run MCGS-SLAM on the example sequence, logging to a Rerun .rrd"
+
+[tasks.test]
+cmd = "pytest -q tests"
+depends-on = ["build"]
+description = "Unit tests (image stream needs the example sequence downloaded)"
 
 [tasks.ate]
 cmd = "evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as"
