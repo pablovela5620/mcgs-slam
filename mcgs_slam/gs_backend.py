@@ -17,7 +17,7 @@ from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
 from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
-from camera_packet import CameraPacket, GlobalCameraPacket
+from camera_packet import CameraPacket, GlobalCameraPacket, pose_update_count
 try:
     from gaussian.gui import gui_utils, slam_gui
 except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
@@ -190,7 +190,7 @@ class GSBackEnd(mp.Process):
                 packet_indices = (
                     view_ids.unsqueeze(1) == self.gaussians.unique_kfIDs.unsqueeze(0)
                 ).nonzero()[:, 0]
-                pose_indices = packet_indices % len(pose_updates)
+                pose_indices = packet_indices % pose_update_count(pose_updates)
                 updates = pose_updates.cuda()[pose_indices]
                 updates_scale = scale_updates.cuda()[pose_indices]
                 

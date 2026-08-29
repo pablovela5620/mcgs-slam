@@ -6,7 +6,12 @@ import sys
 import lietorch
 import torch
 
-from camera_packet import CameraPacket, merge_camera_packets, build_camera_packet
+from camera_packet import (
+    CameraPacket,
+    build_camera_packet,
+    merge_camera_packets,
+    pose_update_count,
+)
 
 
 def test_catalog_packet_preserves_metric_units_and_masks_invalid_depth() -> None:
@@ -122,6 +127,19 @@ def test_merge_camera_packets_uses_tensor_camera_indices_and_explicit_updates() 
     assert merged["cam_indices"].tolist() == [0, 0, 2, 2]
     assert torch.equal(merged["pose_updates"].data, pose_updates.data)
     assert torch.equal(merged["scale_updates"], scale_updates)
+
+
+def test_pose_update_count_accepts_tensor_and_lietorch_se3() -> None:
+    updates_n7 = torch.tensor(
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    assert pose_update_count(updates_n7) == 2
+    assert pose_update_count(lietorch.SE3(updates_n7)) == 2
 
 
 def test_importing_catalog_entry_point_does_not_load_droid_backends() -> None:

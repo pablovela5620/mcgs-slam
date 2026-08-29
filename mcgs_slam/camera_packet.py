@@ -41,6 +41,11 @@ class GlobalCameraPacket(TypedDict):
 RigPacketBatch: TypeAlias = GlobalCameraPacket
 
 
+def pose_update_count(pose_updates: Float32[torch.Tensor, "n 7"] | lietorch.SE3) -> int:
+    """Return the leading batch size for tensor or lietorch pose updates."""
+    return int(pose_updates.data.shape[0])
+
+
 def build_camera_packet(
     *,
     frame_ids: Int64[torch.Tensor, "n"],
