@@ -103,8 +103,6 @@ def eval_rendering_kf(
     image_save_dir = f'{save_dir}/renders/image_{iteration}'
     depth_save_dir = f'{save_dir}/renders/depth_{iteration}'
 
-    # per-camera frame counter so each camera's renders are numbered independently
-    cam_counters = {}
     for frame in viewpoints.values():
         gtimage = frame.original_image.cuda()
 
@@ -121,8 +119,7 @@ def eval_rendering_kf(
         cam_depth_dir = f'{depth_save_dir}/cam{cam_idx}'
         os.makedirs(cam_image_dir, exist_ok=True)
         os.makedirs(cam_depth_dir, exist_ok=True)
-        save_idx = cam_counters.get(cam_idx, 0)
-        cam_counters[cam_idx] = save_idx + 1
+        save_idx = int(frame.tstamp)
         cv2.imwrite(f'{cam_image_dir}/{save_idx:06d}.jpg', pred)
         cv2.imwrite(f'{cam_depth_dir}/{save_idx:06d}.png', np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
 

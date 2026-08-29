@@ -11,6 +11,7 @@ import yaml
 ROOT: Path = Path(__file__).resolve().parents[1]
 
 from factor_graph import FactorGraph
+from depth_video import DepthVideo
 import options
 from options import load_configs
 
@@ -54,6 +55,34 @@ def test_calibration_rejects_mismatched_rig_row_count(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=r"T_cami_cam0.*2.*3"):
         load_configs(args)
+
+
+def test_calibration_rejects_nonidentity_camera_zero_transform(tmp_path: Path) -> None:
+    calibration_path: Path = tmp_path / "bad-camera-zero.yml"
+    _write_calibration(calibration_path, camera_count=2, extrinsic_count=2)
+    calibration: dict[str, object] = yaml.safe_load(
+        calibration_path.read_text(encoding="utf-8")
+    )
+    rig_rows: list[list[float]] = calibration["T_cami_cam0"]  # type: ignore[assignment]
+    rig_rows[0] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    calibration_path.write_text(yaml.safe_dump(calibration), encoding="utf-8")
+    args: SimpleNamespace = SimpleNamespace(
+        calib=str(calibration_path),
+        imagedir=["camera-zero", "camera-one"],
+    )
+
+    with pytest.raises(ValueError, match=r"T_cami_cam0\[0\].*identity"):
+        load_configs(args)
+
+
+def test_static_intrinsics_row_has_no_batch_dimension() -> None:
+    video: DepthVideo = DepthVideo.__new__(DepthVideo)
+    video.intrinsics = torch.arange(3 * 2 * 8, dtype=torch.float32).reshape(3, 2, 8)
+
+    intrinsics: torch.Tensor = video.K_row(1)
+
+    assert intrinsics.shape == (8,)
+    assert torch.equal(intrinsics, video.intrinsics[0, 1])
 
 
 @pytest.mark.parametrize(

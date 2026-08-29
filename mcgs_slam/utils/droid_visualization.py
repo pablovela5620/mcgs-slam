@@ -94,11 +94,11 @@ def droid_visualization(video, device="cuda:0"):
             disps = torch.index_select(video.disps, 0, dirty_index)
             images = torch.index_select(video.images, 0, dirty_index.cpu())
             images = images.cpu()[...,3::8,3::8].permute(0,2,3,1) / 255.0
-            points = droid_backends.iproj(SE3(poses).inv().data, disps, video.K_row(0).squeeze(0)).cpu()
+            points = droid_backends.iproj(SE3(poses).inv().data, disps, video.K_row(0)).cpu()
 
             thresh = droid_visualization.filter_thresh * torch.ones_like(disps.mean(dim=[1,2]))
             count = droid_backends.depth_filter(
-                video.poses, video.disps, video.K_row(0).squeeze(0), dirty_index, thresh)
+                video.poses, video.disps, video.K_row(0), dirty_index, thresh)
 
             count = count.cpu()
             disps = disps.cpu()

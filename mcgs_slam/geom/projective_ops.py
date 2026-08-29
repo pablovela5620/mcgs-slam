@@ -88,6 +88,9 @@ def actp(Gij, X0, jacobian=False):
 def projective_transform(poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False, Tcb=None, Gij=None):
     """ map points from ii->jj """
 
+    if jacobian and Gij is not None and Tcb is not None:
+        raise ValueError("Gij and Tcb cannot both be supplied when jacobian=True")
+
     # inverse project
     X0, Jz = iproj(depths[:,ii], intrinsics[:,ii], jacobian=jacobian)
 

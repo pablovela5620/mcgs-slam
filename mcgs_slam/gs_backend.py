@@ -24,6 +24,9 @@ except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the 
     gui_utils = slam_gui = None
 
 
+_GAUSSIAN_RESET_INTERVAL: int = 501
+
+
 @dataclass(slots=True)
 class CameraProjection:
     """Pinhole calibration and projection matrix for one camera."""
@@ -75,8 +78,6 @@ class GSBackEnd(mp.Process):
             raise RuntimeError("--gsvis requires glfw/imgviz/PyOpenGL, which are not in the pixi env")
 
         self.opt_params = munchify(config["opt_params"])
-        self.config["Training"]["monocular"] = False
-
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
         self.cameras_extent = float(self.config["Dataset"].get("cameras_extent", 6.0))
         self.gaussians.init_lr(self.cameras_extent)
@@ -108,9 +109,7 @@ class GSBackEnd(mp.Process):
         self.gaussian_update_offset = self.config["Training"]["gaussian_update_offset"]
         self.gaussian_th = self.config["Training"]["gaussian_th"]
         self.gaussian_extent = self.cameras_extent * self.config["Training"]["gaussian_extent"]
-        self.gaussian_reset = self.config["Training"]["gaussian_reset"]
         self.size_threshold = self.config["Training"]["size_threshold"]
-        self.window_size = self.config["Training"]["window_size"]
         self.lambda_dnormal = self.config["Training"]["lambda_dnormal"]
 
 
@@ -269,6 +268,8 @@ class GSBackEnd(mp.Process):
 
     @torch.no_grad()
     def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx, cam_idx=0):
+        if cam_idx not in self.camera_projections:
+            raise RuntimeError(f"no projection is cached for camera {cam_idx}")
         projection = self.camera_projections[cam_idx]
         eval_rendering(gtimages, gtdepthdir, traj, self.gaussians,self.save_dir, self.background,
             projection.matrix, projection.K, kf_idx, iteration="after_opt")
@@ -396,8 +397,7 @@ class GSBackEnd(mp.Process):
                     )
 
                 ## Opacity reset
-                self.gaussian_reset = 501
-                if (self.iteration_count % self.gaussian_reset) == 0 and (not update_gaussian):
+                if (self.iteration_count % _GAUSSIAN_RESET_INTERVAL) == 0 and (not update_gaussian):
                     Log("Resetting the opacity of non-visible Gaussians")
                     self.gaussians.reset_opacity_nonvisible(visibility_filter_acm)
 

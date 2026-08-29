@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from gs_backend import build_camera_projection
+from gs_backend import GSBackEnd, build_camera_projection
 
 
 def test_projection_uses_each_cameras_focal_length() -> None:
@@ -20,3 +20,11 @@ def test_projection_uses_each_cameras_focal_length() -> None:
     assert front.matrix[0, 0].item() == pytest.approx(1.0)
     assert side.matrix[0, 0].item() == pytest.approx(2.0)
     assert not torch.equal(front.matrix, side.matrix)
+
+
+def test_eval_rendering_requires_a_cached_camera_projection() -> None:
+    backend: GSBackEnd = GSBackEnd.__new__(GSBackEnd)
+    backend.camera_projections = {}
+
+    with pytest.raises(RuntimeError, match=r"no projection.*camera 3"):
+        backend.eval_rendering({}, None, None, [], cam_idx=3)

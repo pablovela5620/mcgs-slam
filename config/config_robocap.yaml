@@ -12,28 +12,6 @@ Dataset:
   cameras_extent: 12.0
   znear: 0.05
   zfar: 30.0
-  scale_multiplier: 1.0
-  scale_factor: 1.0
-
-Tracking:
-  motion_filter:
-    thresh: 2.4
-    skip_blur: false
-  frontend:
-    keyframe_thresh: 4.0
-    frontend_thresh: 16.0
-    frontend_window: 25
-    frontend_radius: 2
-    frontend_nms: 1
-    mono_depth_alpha: 0.001
-  backend:
-    backend_thresh: 22.0
-    backend_radius: 2
-    backend_nms: 3
-    covis_thresh: 0.2
-  pgba:
-    active: false
-    pgba_thresh: 22.0
 
 Training:
   init_itr_num: 1050
@@ -45,13 +23,10 @@ Training:
   gaussian_update_offset: 50
   gaussian_th: 0.7
   gaussian_extent: 1.0
-  gaussian_reset: 1001
   size_threshold: 20
-  window_size: 10
   rgb_boundary_threshold: 0.01
   lambda_dnormal: 0.1
   compensate_exposure: false
-  monocular: false
 
 opt_params:
   # Basalt poses are immutable truth for this entry point.

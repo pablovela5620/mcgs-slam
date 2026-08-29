@@ -149,7 +149,7 @@ def visualization(video, device="cuda:0"):
                 count = droid_backends.depth_filter(posesall, dispsall, intrinsics, dirty_index, thresh)
                 masks = ((count >= visualization.count) & (disps > .5*disps.mean(dim=[1,2], keepdim=True)))
                 return points, masks
-            points, masks = process_one(poses, disps, video.poses, video.disps, video.K_row(0).squeeze(0))
+            points, masks = process_one(poses, disps, video.poses, video.disps, video.K_row(0))
 
             masks_multi, points_multi, images_multi = [], [], []
             for ix in range(1, video.multi):
@@ -158,7 +158,7 @@ def visualization(video, device="cuda:0"):
                 posesiall = (video.T_ci_c0[ix] * SE3(video.poses[None])).data[0]
                 posesi = torch.index_select(posesiall, 0, dirty_index)
                 dispsi = torch.index_select(video.disps_list[ix], 0, dirty_index)
-                pointsi, masksi = process_one(posesi, dispsi, posesiall, video.disps_list[ix], video.K_row(ix).squeeze(0))
+                pointsi, masksi = process_one(posesi, dispsi, posesiall, video.disps_list[ix], video.K_row(ix))
                 points_multi.append(pointsi)
                 masks_multi.append(masksi)
 

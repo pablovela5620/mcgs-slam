@@ -34,7 +34,7 @@ def save_pc(args, video, output, suffix=''):
         posesi = (video.T_ci_c0[ix] * lietorch.SE3(poses.cuda()[None])).data[0]
         imagesi = torch.index_select(video.globuf.images_all_list[ix], 0, index)
         dispsi = torch.index_select(video.globuf.disps_all_list[ix], 0, index)
-        save_pc_one(posesi, dispsi.cuda(), imagesi, video.K_row(ix).squeeze(0), index.cuda(), ix+1, output, suffix)
+        save_pc_one(posesi, dispsi.cuda(), imagesi, video.K_row(ix), index.cuda(), ix+1, output, suffix)
 
 def pcwrite(filename, points, colors):
     """Save a point cloud to a polygon .ply file.

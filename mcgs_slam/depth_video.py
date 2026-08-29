@@ -87,7 +87,7 @@ class DepthVideo:
 
     def K_row(self, cam: int) -> torch.Tensor:
         """Return one camera's static intrinsic row."""
-        return self.intrinsics[0, [cam]]
+        return self.intrinsics[0, cam]
 
     def release_buffer(self, window):
         with self.get_lock():
@@ -292,16 +292,16 @@ class DepthVideo:
             poses = self.poses[:self.counter.value].clone()
 
             d1 = droid_backends.frame_distance(
-                poses, self.disps, self.K_row(0).squeeze(0), ii, jj, beta)
+                poses, self.disps, self.K_row(0), ii, jj, beta)
 
             d2 = droid_backends.frame_distance(
-                poses, self.disps, self.K_row(0).squeeze(0), jj, ii, beta)
+                poses, self.disps, self.K_row(0), jj, ii, beta)
 
             d = .5 * (d1 + d2)
 
         else:
             d = droid_backends.frame_distance(
-                self.poses, self.disps, self.K_row(0).squeeze(0), ii, jj, beta)
+                self.poses, self.disps, self.K_row(0), ii, jj, beta)
 
         if return_matrix:
             return d.reshape(N, N)
@@ -371,7 +371,7 @@ class DepthVideo:
                     Gijs.append(Gij.data[0])
                     Gicjs.append(Gicj.data[0])
 
-                Ks = [self.K_row(ic) for ic in range(self.multi)]
+                Ks = [self.K_row(ic)[None] for ic in range(self.multi)]
                 T_ci_c0 = [T.data[0,0] for T in self.T_ci_c0]
                 droid_backends.multi_cam_ba(self.poses, Ks, self.disps_list, self.disps_sens_list, Gijs, Gicjs, T_ci_c0,
                                             targets, weights, etas, iis, jjs, t0, t1, 6, lm, ep)

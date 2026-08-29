@@ -11,7 +11,6 @@ def get_args():
     parser.add_argument('--GPU', default=0, type=int)
 
     parser.add_argument("--imagedir", type=str, help="path to color image directory", nargs='+')
-    parser.add_argument("--posefile", type=str, help="path to pose file")
     parser.add_argument("--calib", type=str, help="path to calibration file")
     parser.add_argument("--t0", default=0, type=int, help="starting frame")
     parser.add_argument("--stride", default=3, type=int, help="frame stride")
@@ -72,6 +71,11 @@ def load_configs(args):
         raise ValueError(
             f"T_cami_cam0 has {len(rig_rows)} rows but --imagedir has {args.multi} entries"
         )
+    camera_zero_se3 = np.asarray(rig_rows[0], dtype=np.float64)
+    identity_translation_and_vector = np.allclose(camera_zero_se3[:6], 0.0)
+    identity_quaternion_scalar = np.isclose(abs(camera_zero_se3[6]), 1.0)
+    if not identity_translation_and_vector or not identity_quaternion_scalar:
+        raise ValueError("T_cami_cam0[0] must be the identity transform")
     args.T_cami_cam0 = torch.as_tensor(rig_rows, dtype=torch.float)
     args.timescale = float(params['timescale'])
 

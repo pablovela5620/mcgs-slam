@@ -5,11 +5,20 @@ from collections import defaultdict
 
 
 def disparity_scale(estimated: torch.Tensor, sensor: torch.Tensor) -> torch.Tensor:
-    """Return median disparity scale, or 1.0 when the sensor prior is absent."""
-    sensor_median = sensor.median()
-    if not torch.isfinite(sensor_median) or sensor_median <= 0:
-        return estimated.new_tensor(1.0)
-    return estimated.median() / sensor_median
+    """Return the shared-support median disparity ratio."""
+    valid = (
+        torch.isfinite(estimated)
+        & torch.isfinite(sensor)
+        & (estimated > 0.0)
+        & (sensor > 0.0)
+    )
+    estimated_median = estimated[valid].median()
+    sensor_median = sensor[valid].median()
+    return torch.where(
+        torch.any(valid),
+        estimated_median / sensor_median,
+        estimated.new_tensor(1.0),
+    )
 
 
 class DroidFrontend:
