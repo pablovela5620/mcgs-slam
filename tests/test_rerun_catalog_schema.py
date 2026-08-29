@@ -106,7 +106,8 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     logger.flush()
     rr.get_global_data_recording().disconnect()
 
-    chunks: list[rrx.Chunk] = rrx.RrdReader(rrd_path).stream().to_chunks()
+    recording_reader = rrx.RrdReader(rrd_path)
+    chunks: list[rrx.Chunk] = recording_reader.stream().to_chunks()
     entity_paths: set[str] = {_entity_path(chunk) for chunk in chunks}
     expected_paths: set[str] = {
         "/world/rig_00",
@@ -192,6 +193,22 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     assert pinhole_components["simplecv.components.DistortionModel"] == [["kannala_brandt"]]
     coefficients: list[float] = pinhole_components["simplecv.components.DistortionCoefficients"][0][0]
     assert np.allclose(coefficients, [0.1, -0.02, 0.003, -0.0004, 0.0, 0.0, 0.0, 0.0])
+
+    blueprint_reader = rrx.RrdReader(rrd_path)
+    blueprint_chunks: list[rrx.Chunk] = blueprint_reader.stream(
+        store=blueprint_reader.blueprints()[0]
+    ).to_chunks()
+    view_queries: list[str] = [
+        query
+        for chunk in blueprint_chunks
+        if _entity_path(chunk).endswith("/ViewContents")
+        for query_group in chunk.to_record_batch().to_pydict()["ViewContents:query"]
+        for query in query_group
+    ]
+    for camera_id in (0, 1, 4, 5):
+        assert (
+            f"- world/rig_00/cam_{camera_id:02d}/rectified/image" in view_queries
+        )
 
 
 def test_catalog_logger_rejects_nonmetric_map_scale(tmp_path: Path) -> None:
