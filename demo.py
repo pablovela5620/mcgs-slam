@@ -14,8 +14,11 @@ from tqdm import tqdm
 from mcgs_slam.utils import save_utils
 from mcgs_slam.streams import image_stream
 from mcgs_slam.options import get_args, load_configs
-from rerun_logger import RerunLogger
+from rerun_logger_waymo import WaymoRerunLogger
 from utils.plot_depth_map import colorize_np
+
+
+MAP_SCALE: float = 0.2
 
 
 def show_image(image, disp_est):
@@ -40,11 +43,15 @@ if __name__ == '__main__':
 
     rr_logger = None
     if args.rrd or args.rerun_spawn:
-        rr_logger = RerunLogger(args.imagedir,
-                                save_path=args.rrd, spawn=args.rerun_spawn,
-                                splat_every=args.rr_splat_every)
+        rr_logger = WaymoRerunLogger(
+            args.imagedir,
+            map_scale=MAP_SCALE,
+            save_path=args.rrd,
+            spawn=args.rerun_spawn,
+            splat_every=args.rr_splat_every,
+        )
 
-    mcgs = Mcgs(args, map_scale=0.2, rr_logger=rr_logger)
+    mcgs = Mcgs(args, map_scale=MAP_SCALE, rr_logger=rr_logger)
     tstamps = {}
     t0 = time.time()
     N = len(os.listdir(args.imagedir[0])[::args.stride])

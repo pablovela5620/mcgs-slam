@@ -4,35 +4,63 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import rerun as rr
 import rerun.experimental as rrx
 import torch
 from jaxtyping import Float32, Float64
+from simplecv.camera_parameters import (
+    Extrinsics,
+    Fisheye62Parameters,
+    Intrinsics,
+    KannalaBrandtDistortion,
+    PinholeParameters,
+)
+from simplecv.rig import CameraSensor, RigCalibration
 
-from catalog_stream import CameraCalibration
-from rerun_logger import RerunLogger
+from catalog_stream import CatalogKeyframe, FisheyeRectifier
+from rerun_logger_catalog import CatalogRerunLogger
 
 
-def _camera_calibrations() -> list[CameraCalibration]:
-    """Build four literal catalog calibrations with physical camera IDs."""
-    calibrations: list[CameraCalibration] = []
+def _camera_calibrations() -> tuple[RigCalibration, tuple[PinholeParameters, ...]]:
+    """Build one literal four-camera SimpleCV rig and virtual pinholes."""
+    cameras: list[CameraSensor] = []
     for camera_id, name in zip((0, 1, 4, 5), ("left_front", "right_front", "left", "right"), strict=True):
         camera_from_rig_44: Float64[np.ndarray, "4 4"] = np.eye(4, dtype=np.float64)
         camera_from_rig_44[0, 3] = camera_id / 100.0
-        calibrations.append(
-            CameraCalibration(
-                camera_id=camera_id,
+        camera = CameraSensor(
+            index=camera_id,
+            name=name,
+            kind="rgb",
+            pinhole=Fisheye62Parameters(
                 name=name,
-                intrinsic_33=np.array(
-                    [[600.0, 0.0, 960.0], [0.0, 601.0, 540.0], [0.0, 0.0, 1.0]],
-                    dtype=np.float64,
+                extrinsics=Extrinsics(
+                    cam_R_world=camera_from_rig_44[:3, :3],
+                    cam_t_world=camera_from_rig_44[:3, 3],
                 ),
-                distortion_4=np.array([0.1, -0.02, 0.003, -0.0004], dtype=np.float64),
-                camera_from_rig_44=camera_from_rig_44,
-                resolution_wh=(1920, 1080),
-            )
+                intrinsics=Intrinsics.from_k_matrix(
+                    camera_conventions="RDF",
+                    k_matrix=np.array(
+                        [[600.0, 0.0, 960.0], [0.0, 601.0, 540.0], [0.0, 0.0, 1.0]],
+                        dtype=np.float64,
+                    ),
+                    height=1080,
+                    width=1920,
+                ),
+                distortion=KannalaBrandtDistortion(
+                    k1=0.1,
+                    k2=-0.02,
+                    k3=0.003,
+                    k4=-0.0004,
+                ),
+            ),
         )
-    return calibrations
+        cameras.append(camera)
+    rig_calibration = RigCalibration(cameras=cameras, reference_index=0)
+    rectified_cameras: tuple[PinholeParameters, ...] = tuple(
+        FisheyeRectifier(camera).virtual_camera for camera in cameras
+    )
+    return rig_calibration, rectified_cameras
 
 
 def _entity_path(chunk: rrx.Chunk) -> str:
@@ -42,30 +70,24 @@ def _entity_path(chunk: rrx.Chunk) -> str:
 
 def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path: Path) -> None:
     rrd_path: Path = tmp_path / "catalog-schema.rrd"
-    calibrations: list[CameraCalibration] = _camera_calibrations()
-    logger = RerunLogger(
-        camera_names=[calibration.name for calibration in calibrations],
-        camera_ids=[calibration.camera_id for calibration in calibrations],
+    rig_calibration, rectified_cameras = _camera_calibrations()
+    logger = CatalogRerunLogger(
+        rig_calibration=rig_calibration,
+        rectified_cameras=rectified_cameras,
+        map_scale=1.0,
         save_path=str(rrd_path),
-        catalog_mode=True,
-        world_coordinates=rr.ViewCoordinates.RFU,
     )
-    virtual_k_n4: Float32[torch.Tensor, "4 4"] = torch.tensor(
-        [[224.0, 224.0, 320.0, 180.0]] * 4,
-        dtype=torch.float32,
-    )
-    logger.log_catalog_calibration(calibrations, virtual_k_n4)
     streams: list[SimpleNamespace] = [
         SimpleNamespace(
             times_ns=np.array([1_000_000_000], dtype=np.int64),
             samples=[b"\x00\x00\x00\x01"],
             is_keyframe=[True],
         )
-        for _ in calibrations
+        for _ in rig_calibration.cameras
     ]
     logger.relay_video_streams(streams)
     world_from_rig_44: Float64[np.ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    frame: SimpleNamespace = SimpleNamespace(
+    frame = CatalogKeyframe(
         timestamp_ns=1_000_000_000,
         world_from_rig=world_from_rig_44,
         images_rgb=torch.zeros((4, 3, 8, 8), dtype=torch.uint8),
@@ -89,7 +111,6 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     expected_paths: set[str] = {
         "/world/rig_00",
         "/world/rig_00/cam_00/rectified/render",
-        "/world/rig_00/cam_00/rectified/gt",
         "/world/trajectory",
     }
     for camera_id in (0, 1, 4, 5):
@@ -100,6 +121,7 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
                 f"{camera_path}/pinhole",
                 f"{camera_path}/pinhole/video",
                 f"{camera_path}/rectified",
+                f"{camera_path}/rectified/pinhole",
                 f"{camera_path}/rectified/image",
                 f"{camera_path}/rectified/depth",
             }
@@ -108,6 +130,7 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     assert not any(path.startswith("/world/keyframes/") for path in entity_paths)
     assert not any("virtual_pinhole" in path for path in entity_paths)
     assert not any(path.startswith("/render_vs_gt/") for path in entity_paths)
+    assert not any(path.endswith("/rectified/gt") for path in entity_paths)
 
     root_chunk: rrx.Chunk = next(chunk for chunk in chunks if _entity_path(chunk) == "/")
     assert root_chunk.to_record_batch()["ViewCoordinates:xyz"].to_pylist() == [[[3, 5, 1]]]
@@ -169,3 +192,15 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     assert pinhole_components["simplecv.components.DistortionModel"] == [["kannala_brandt"]]
     coefficients: list[float] = pinhole_components["simplecv.components.DistortionCoefficients"][0][0]
     assert np.allclose(coefficients, [0.1, -0.02, 0.003, -0.0004, 0.0, 0.0, 0.0, 0.0])
+
+
+def test_catalog_logger_rejects_nonmetric_map_scale(tmp_path: Path) -> None:
+    rig_calibration, rectified_cameras = _camera_calibrations()
+
+    with pytest.raises(ValueError, match="map_scale.*1.0"):
+        CatalogRerunLogger(
+            rig_calibration=rig_calibration,
+            rectified_cameras=rectified_cameras,
+            map_scale=0.2,
+            save_path=str(tmp_path / "invalid.rrd"),
+        )

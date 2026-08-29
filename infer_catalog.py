@@ -8,21 +8,29 @@ configure_import_paths()  # nopep8
 import json
 import time
 from dataclasses import dataclass
-from itertools import chain
 from pathlib import Path
 from typing import Literal
 
 import cv2
-import rerun as rr
 import torch
 import tyro
 
-from catalog_stream import CATALOG_URL, DATASET_ID, SEGMENT_ID, CatalogKeyframe, RobocapSegment
+from catalog_stream import (
+    CatalogKeyframe,
+    RobocapSegment,
+    camera_from_world_poses,
+)
 from gs_backend import GSBackEnd
-from camera_packet import CameraPacket, build_camera_packet, merge_camera_packets
+from camera_packet import CameraPacket, build_camera_packet
 from prior import MoGePrior, PriorPrediction
-from rerun_logger import RerunLogger
+from rerun_logger_catalog import CatalogRerunLogger
 from utils.utils import load_config
+
+
+CATALOG_URL: str = "rerun+http://pablo-dl-server.ilish-ruler.ts.net:51235"
+DATASET_ID: str = "18CFB19109CFDB071d88fb8b48ef65e9"
+SEGMENT_ID: str = "robocap__f408193e6447b3b0__s00000021"
+MAP_SCALE: float = 1.0
 
 
 @dataclass
@@ -79,76 +87,75 @@ def run(config: CatalogConfig) -> dict[str, float | int | str]:
         segment_id=config.segment_id,
         decoder=config.decoder,
     )
-    keyframe_iterator = segment.iter_keyframes(
-        start_seconds=config.start,
-        end_seconds=config.end,
-        kf_dist=config.kf_dist,
-        kf_angle=config.kf_angle,
-    )
-    first_frame: CatalogKeyframe = next(keyframe_iterator)
-
     mapper_config: dict = load_config(str(config.config))
     mapper_config["opt_params"]["position_lr_max_steps"] = config.refine_iters
     rrd_path: Path = config.output / "mcgs_catalog.rrd"
-    rr_logger = RerunLogger(
-        camera_names=segment.camera_names,
-        camera_ids=list(segment.camera_ids),
-        scale_factor=1.0,
+    rr_logger = CatalogRerunLogger(
+        rig_calibration=segment.rig_calibration,
+        rectified_cameras=segment.rectified_cameras,
+        map_scale=MAP_SCALE,
         save_path=str(rrd_path),
         max_splat_scale=0.3,
         max_depth=15.0,
         image_plane_distance=0.25,
         trajectory_radius=0.04,
         splat_every=4,
-        catalog_mode=True,
-        world_coordinates=rr.ViewCoordinates.RFU,
     )
-    rr_logger.log_catalog_calibration(
-        segment.calibrations,
-        first_frame.virtual_K,
-    )
-    rr_logger.relay_video_streams(first_frame.relay_streams)
 
     prior = MoGePrior("vits", resolution_level=3, device="cuda")
     backend = GSBackEnd(mapper_config, str(config.output), use_gui=False, rr_logger=rr_logger)
-    packets: list[CameraPacket] = []
     keyframe_count: int = 0
-    frame: CatalogKeyframe
-    for frame in chain((first_frame,), keyframe_iterator):
-        prediction: PriorPrediction = prior(
-            frame.images_rgb,
-            frame.virtual_K[:, 0],
-        )
-        rr_logger.log_catalog_keyframe(
-            keyframe_count,
-            frame,
-            prediction.depth,
-            prediction.normal,
-        )
-        viz_idx: torch.Tensor = torch.tensor([keyframe_count], dtype=torch.long)
-        for cam_idx in range(len(segment.calibrations)):
-            packet: CameraPacket = build_camera_packet(
-                frame_ids=viz_idx,
-                cam_idx=cam_idx,
-                n_cameras=len(segment.calibrations),
-                poses_camera_from_world_n7=frame.camera_from_world[cam_idx : cam_idx + 1],
-                images_rgb_n3hw=frame.images_rgb[cam_idx : cam_idx + 1],
-                depth_metres_nhw=prediction.depth[cam_idx : cam_idx + 1],
-                normals_n3hw=prediction.normal[cam_idx : cam_idx + 1],
-                intrinsics_n4=frame.virtual_K[cam_idx : cam_idx + 1],
-                map_scale=1.0,
+    with segment.open_window(
+        start_seconds=config.start,
+        end_seconds=config.end,
+        kf_dist=config.kf_dist,
+        kf_angle=config.kf_angle,
+    ) as window:
+        rr_logger.relay_video_streams(window.relay_streams)
+        frame: CatalogKeyframe
+        for frame in window.keyframes():
+            prediction: PriorPrediction = prior(
+                frame.images_rgb,
+                segment.virtual_intrinsics[:, 0],
             )
-            backend.process_track_data(packet)
-            packets.append(packet)
-        rr_logger.log_gaussians(backend.gaussians)
-        keyframe_count += 1
-        print(
-            f"keyframe {keyframe_count:03d} "
-            f"video_time={frame.timestamp_ns / 1e9:.6f}s "
-            f"gaussians={backend.gaussians.get_xyz.shape[0]}"
-        )
+            rr_logger.log_catalog_keyframe(
+                keyframe_count,
+                frame,
+                prediction.depth,
+                prediction.normal,
+            )
+            camera_from_world_n7: torch.Tensor = camera_from_world_poses(
+                frame.world_from_rig,
+                segment.rig_calibration,
+            )
+            frame_ids: torch.Tensor = torch.tensor(
+                [keyframe_count], dtype=torch.long
+            )
+            camera_count: int = len(segment.rig_calibration.cameras)
+            for cam_idx in range(camera_count):
+                packet: CameraPacket = build_camera_packet(
+                    frame_ids=frame_ids,
+                    cam_idx=cam_idx,
+                    n_cameras=camera_count,
+                    poses_camera_from_world_n7=camera_from_world_n7[
+                        cam_idx : cam_idx + 1
+                    ],
+                    images_rgb_n3hw=frame.images_rgb[cam_idx : cam_idx + 1],
+                    depth_metres_nhw=prediction.depth[cam_idx : cam_idx + 1],
+                    normals_n3hw=prediction.normal[cam_idx : cam_idx + 1],
+                    intrinsics_n4=segment.virtual_intrinsics[cam_idx : cam_idx + 1],
+                    map_scale=MAP_SCALE,
+                )
+                backend.process_track_data(packet)
+            rr_logger.log_gaussians(backend.gaussians)
+            keyframe_count += 1
+            print(
+                f"keyframe {keyframe_count:03d} "
+                f"video_time={frame.timestamp_ns / 1e9:.6f}s "
+                f"gaussians={backend.gaussians.get_xyz.shape[0]}"
+            )
 
-    backend.process_global_track_data(merge_camera_packets(packets))
+    backend.refine_existing_viewpoints(iters=10)
     backend.finalize()
     quality: dict[str, float] = backend.eval_rendering_kf()
     rr_logger.send_final_blueprint()

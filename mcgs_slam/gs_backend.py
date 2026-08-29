@@ -266,6 +266,16 @@ class GSBackEnd(mp.Process):
         poses_cw.sort(key=lambda x: x[0])
         return np.stack(poses_cw)
 
+    def refine_existing_viewpoints(self, *, iters: int) -> None:
+        """Refine the current trusted-pose window without rebuilding viewpoints."""
+        if iters < 1:
+            raise ValueError("iters must be positive")
+        self.map(self.current_window, iters=iters)
+        if self.rr is not None:
+            self._log_renders(
+                {viewpoint.cam_idx: viewpoint for viewpoint in self.viewpoints.values()}
+            )
+
     @torch.no_grad()
     def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx, cam_idx=0):
         if cam_idx not in self.camera_projections:

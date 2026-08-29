@@ -1,8 +1,58 @@
 """Hermetic contracts for the robocap catalog stream."""
 
-import numpy as np
+from dataclasses import fields
 
-from catalog_stream import FisheyeRectifier, KeyframeSelector, camera_from_world_pose
+import numpy as np
+import pytest
+from simplecv.camera_parameters import (
+    Extrinsics,
+    Fisheye62Parameters,
+    Intrinsics,
+    KannalaBrandtDistortion,
+    PinholeParameters,
+)
+from simplecv.rig import CameraSensor
+
+from catalog_stream import (
+    CatalogKeyframe,
+    FisheyeRectifier,
+    KeyframeSelector,
+    RobocapSegment,
+    camera_from_world_pose,
+    catalog_camera_path,
+)
+
+
+def _fisheye_camera(
+    intrinsic_33: np.ndarray,
+    distortion_4: np.ndarray,
+    camera_id: int = 0,
+) -> CameraSensor:
+    """Build one SimpleCV camera for rectification examples."""
+    extrinsics = Extrinsics(cam_R_world=np.eye(3), cam_t_world=np.zeros(3))
+    intrinsics = Intrinsics.from_k_matrix(
+        camera_conventions="RDF",
+        k_matrix=intrinsic_33,
+        height=1080,
+        width=1920,
+    )
+    distortion = KannalaBrandtDistortion(
+        k1=float(distortion_4[0]),
+        k2=float(distortion_4[1]),
+        k3=float(distortion_4[2]),
+        k4=float(distortion_4[3]),
+    )
+    return CameraSensor(
+        index=camera_id,
+        name=f"camera-{camera_id}",
+        kind="rgb",
+        pinhole=Fisheye62Parameters(
+            name=f"camera-{camera_id}",
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            distortion=distortion,
+        ),
+    )
 
 
 def _project_kb4(
@@ -37,17 +87,20 @@ def test_kb4_rectification_lands_on_virtual_pinhole_projection() -> None:
     distortion_4: np.ndarray = np.array([0.07, -0.03, 0.02, -0.006], dtype=np.float64)
     point_xyz: np.ndarray = np.array([0.55, -0.22, 1.8], dtype=np.float64)
     distorted_xy: np.ndarray = _project_kb4(point_xyz, intrinsic_33, distortion_4)
-    rectifier = FisheyeRectifier(intrinsic_33, distortion_4)
+    rectifier = FisheyeRectifier(_fisheye_camera(intrinsic_33, distortion_4))
 
     rectified_xy: np.ndarray = rectifier.rectify_points(distorted_xy[None])[0]
     expected_xy: np.ndarray = np.array(
         [
-            rectifier.virtual_K[0, 0] * point_xyz[0] / point_xyz[2] + 320.0,
-            rectifier.virtual_K[1, 1] * point_xyz[1] / point_xyz[2] + 180.0,
+            rectifier.virtual_camera.intrinsics.fl_x * point_xyz[0] / point_xyz[2]
+            + 320.0,
+            rectifier.virtual_camera.intrinsics.fl_y * point_xyz[1] / point_xyz[2]
+            + 180.0,
         ]
     )
 
     assert np.linalg.norm(rectified_xy - expected_xy) <= 0.5
+    assert isinstance(rectifier.virtual_camera, PinholeParameters)
 
 
 def _z_rotation(degrees: float) -> np.ndarray:
@@ -122,3 +175,21 @@ def test_mapper_camera_zero_recovers_basalt_rig_placement() -> None:
     rig_from_world_44[:3, 3] = rig_from_world_7[:3]
 
     assert np.allclose(np.linalg.inv(rig_from_world_44), world_from_rig_44, atol=1e-6)
+
+
+def test_catalog_keyframe_contains_only_dynamic_rig_frame_data() -> None:
+    assert [field.name for field in fields(CatalogKeyframe)] == [
+        "timestamp_ns",
+        "images_rgb",
+        "world_from_rig",
+    ]
+
+
+def test_catalog_segment_requires_endpoint_dataset_and_segment() -> None:
+    with pytest.raises(TypeError):
+        RobocapSegment()  # type: ignore[call-arg]
+
+
+def test_catalog_camera_paths_use_simplecv_zero_padding() -> None:
+    assert catalog_camera_path(1) == "/world/rig_00/cam_01"
+    assert catalog_camera_path(10) == "/world/rig_00/cam_10"
