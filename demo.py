@@ -13,7 +13,7 @@ import time
 import torch
 import numpy as np
 
-from mcgs import Mcgs, SCALE_FACTOR
+from mcgs import Mcgs
 from tqdm import tqdm
 from mcgs_slam.utils import save_utils
 from mcgs_slam.streams import image_stream
@@ -44,7 +44,7 @@ if __name__ == '__main__':
 
     rr_logger = None
     if args.rrd or args.rerun_spawn:
-        rr_logger = RerunLogger(args.imagedir, scale_factor=SCALE_FACTOR,
+        rr_logger = RerunLogger(args.imagedir,
                                 save_path=args.rrd, spawn=args.rerun_spawn,
                                 splat_every=args.rr_splat_every)
 

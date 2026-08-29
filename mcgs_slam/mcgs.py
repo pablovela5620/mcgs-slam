@@ -19,11 +19,6 @@ from tqdm import trange
 from gs_backend import GSBackEnd
 from utils.utils import load_config
 
-# Pose/translation scale between the metric SLAM world and the Gaussian-map
-# world. Consumed by the GS packets and the Rerun logger — keep single-sourced.
-SCALE_FACTOR = 0.2
-
-
 class CameraPacket(TypedDict):
     """One camera's tracking data passed to the Gaussian backend."""
 
@@ -38,13 +33,71 @@ class CameraPacket(TypedDict):
     pose_updates: torch.Tensor | lietorch.SE3 | None
     scale_updates: torch.Tensor | None
 
+
+def build_camera_packet(
+    *,
+    viz_idx: torch.Tensor,
+    cam_idx: int,
+    poses_camera_from_world_n7: torch.Tensor,
+    images_rgb_n3hw: torch.Tensor,
+    depth_metres_nhw: torch.Tensor,
+    normals_n3hw: torch.Tensor,
+    intrinsics_n4: torch.Tensor,
+    scale_factor: float = 0.2,
+    pose_updates: torch.Tensor | lietorch.SE3 | None = None,
+    scale_updates: torch.Tensor | None = None,
+) -> CameraPacket:
+    """Build one Gaussian-backend packet from trusted camera observations.
+
+    Args:
+        viz_idx: Int64 mapper keyframe indices with shape ``[n]``.
+        cam_idx: Camera index used for the unique ``+500*cam_idx`` viewpoint key.
+        poses_camera_from_world_n7: Float32 lietorch ``T_camera_from_world``
+            vectors with shape ``[n, 7]`` and metric translations.
+        images_rgb_n3hw: UInt8 RGB images with shape ``[n, 3, h, w]``.
+        depth_metres_nhw: Float32 metric depth with shape ``[n, h, w]``.
+        normals_n3hw: Float32 camera-frame normals with shape ``[n, 3, h, w]``;
+            a zero normal marks invalid prior geometry.
+        intrinsics_n4: Float32 virtual-pinhole ``[fx, fy, cx, cy]`` values with
+            shape ``[n, 4]``.
+        scale_factor: Translation and depth scale into Gaussian-map units.
+        pose_updates: Optional pose correction used only by the legacy global path.
+        scale_updates: Optional scale correction used only by the legacy global path.
+
+    Returns:
+        Canonical CPU packet consumed by :class:`GSBackEnd`.
+    """
+    poses_scaled_n7: torch.Tensor = poses_camera_from_world_n7.detach().to(
+        device="cpu", dtype=torch.float32
+    ).clone()
+    poses_scaled_n7[:, :3] *= scale_factor
+    depth_scaled_nhw: torch.Tensor = depth_metres_nhw.detach().to(
+        device="cpu", dtype=torch.float32
+    ) * scale_factor
+    return {
+        "viz_idx": viz_idx.detach().to(device="cpu", dtype=torch.long),
+        "tstamp": viz_idx.detach().to(device="cpu", dtype=torch.long) + 500 * cam_idx,
+        "poses": poses_scaled_n7,
+        "images": images_rgb_n3hw.detach().to(device="cpu", dtype=torch.uint8),
+        "normals": normals_n3hw.detach().to(device="cpu", dtype=torch.float32),
+        "depths": mask_invalid_depth(
+            depth_scaled_nhw,
+            normals_n3hw.detach().to(device="cpu", dtype=torch.float32),
+        ),
+        "intrinsics": intrinsics_n4.detach().to(device="cpu", dtype=torch.float32),
+        "cam_idx": cam_idx,
+        "pose_updates": pose_updates.to(device="cpu") if pose_updates is not None else None,
+        "scale_updates": scale_updates.to(device="cpu") if scale_updates is not None else None,
+    }
+
+
 class Mcgs:
-    def __init__(self, args, video=None, rr_logger=None):
+    def __init__(self, args, video=None, rr_logger=None, scale_factor: float = 0.2):
         super(Mcgs, self).__init__()
         self.load_weights(args.weights)
         self.args = args
         self.config = load_config(args.config)
-        self.scale_factor = SCALE_FACTOR
+        self.scale_factor = scale_factor
         self.rr = rr_logger
 
         # store images, depth, poses, intrinsics (shared between processes)
@@ -86,7 +139,7 @@ class Mcgs:
         self.net.load_state_dict(state_dict)
         self.net.to("cuda:0").eval()
     
-    def _scale_poses(self, poses, scale_factor=SCALE_FACTOR):
+    def _scale_poses(self, poses, scale_factor: float):
         scaled_poses = poses.clone()
         scaled_poses[:, :3] *= scale_factor
         return scaled_poses
@@ -101,21 +154,20 @@ class Mcgs:
         """Build the canonical Gaussian-backend packet for one rig camera."""
         poses_c0_w = lietorch.SE3(self.video.poses[viz_idx].to(device="cpu")[None])
         poses_ci_w = (self.video.T_ci_c0[cam_idx].cpu() * poses_c0_w).data[0]
-        return {
-            "viz_idx": viz_idx.to(device="cpu"),
-            "tstamp": self.video.tstamp[viz_idx].to(device="cpu") + 500 * cam_idx,
-            "poses": self._scale_poses(poses_ci_w, scale_factor=self.scale_factor),
-            "images": self.video.images_up_list[cam_idx][viz_idx.cpu()],
-            "normals": self.video.normals_list[cam_idx][viz_idx.cpu()],
-            "depths": mask_invalid_depth(
-                self.scale_factor / self.video.disps_up_list[cam_idx][viz_idx.cpu()].to(device="cpu"),
-                self.video.normals_list[cam_idx][viz_idx.cpu()],
+        return build_camera_packet(
+            viz_idx=viz_idx,
+            cam_idx=cam_idx,
+            poses_camera_from_world_n7=poses_ci_w,
+            images_rgb_n3hw=self.video.images_up_list[cam_idx][viz_idx.cpu()],
+            depth_metres_nhw=(
+                1.0 / self.video.disps_up_list[cam_idx][viz_idx.cpu()].to(device="cpu")
             ),
-            "intrinsics": self.video.K(cam_idx)[0, viz_idx].to(device="cpu")[:, :4] * 8,
-            "cam_idx": cam_idx,
-            "pose_updates": dposes.to(device="cpu") if dposes is not None else None,
-            "scale_updates": dscales.to(device="cpu") if dscales is not None else None,
-        }
+            normals_n3hw=self.video.normals_list[cam_idx][viz_idx.cpu()],
+            intrinsics_n4=self.video.K(cam_idx)[0, viz_idx].to(device="cpu")[:, :4] * 8,
+            scale_factor=self.scale_factor,
+            pose_updates=dposes,
+            scale_updates=dscales,
+        )
 
     def call_gs(self, viz_idx, dposes=None, dscale=None):
 

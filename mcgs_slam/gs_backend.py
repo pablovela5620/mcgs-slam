@@ -37,14 +37,16 @@ def build_camera_projection(
     intrinsics: torch.Tensor,
     image_hw: tuple[int, int],
     device: str = "cuda",
+    znear: float = 0.01,
+    zfar: float = 100.0,
 ) -> CameraProjection:
     """Build one camera's projection from pixel intrinsics and image size."""
     height, width = image_hw
     fx, fy, cx, cy = (float(value) for value in intrinsics[:4])
     K: list[float | int] = [fx, fy, cx, cy, width, height]
     matrix = getProjectionMatrix2(
-        znear=0.01,
-        zfar=100.0,
+        znear=znear,
+        zfar=zfar,
         fx=fx,
         fy=fy,
         cx=cx,
@@ -75,11 +77,11 @@ class GSBackEnd(mp.Process):
         self.config["Training"]["monocular"] = False
 
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
-        self.gaussians.init_lr(6.0)
+        self.cameras_extent = float(self.config["Dataset"].get("cameras_extent", 6.0))
+        self.gaussians.init_lr(self.cameras_extent)
         self.gaussians.training_setup(self.opt_params)
         self.background = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
 
-        self.cameras_extent = 6.0
         self.set_hyperparams()
 
         if self.use_gui:
@@ -126,7 +128,13 @@ class GSBackEnd(mp.Process):
     ) -> CameraProjection:
         """Return the cached projection for one camera, building it on first use."""
         if cam_idx not in self.camera_projections:
-            self.camera_projections[cam_idx] = build_camera_projection(intrinsics, image_hw)
+            dataset_config = self.config["Dataset"]
+            self.camera_projections[cam_idx] = build_camera_projection(
+                intrinsics,
+                image_hw,
+                znear=float(dataset_config.get("znear", 0.01)),
+                zfar=float(dataset_config.get("zfar", 100.0)),
+            )
         return self.camera_projections[cam_idx]
 
     def process_track_data(self, packet):
@@ -259,8 +267,14 @@ class GSBackEnd(mp.Process):
         eval_rendering(gtimages, gtdepthdir, traj, self.gaussians,self.save_dir, self.background,
             projection.matrix, projection.K, kf_idx, iteration="after_opt")
     
-    def eval_rendering_kf(self):
-        eval_rendering_kf(self.viewpoints, self.gaussians, self.save_dir, self.background, iteration="after_opt")
+    def eval_rendering_kf(self) -> dict[str, float]:
+        return eval_rendering_kf(
+            self.viewpoints,
+            self.gaussians,
+            self.save_dir,
+            self.background,
+            iteration="after_opt",
+        )
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None):
         self.gaussians.extend_from_pcd_seq(

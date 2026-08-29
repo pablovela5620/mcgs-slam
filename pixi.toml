@@ -39,7 +39,7 @@ pyyaml = ">=6.0"
 munch = ">=4.0"
 plyfile = ">=1.0"
 rich = ">=13"
-jaxtyping = ">=0.2.36"
+jaxtyping = ">=0.2.36,<0.3"
 einops = ">=0.8"
 open3d = ">=0.19"
 rerun-sdk = ">=0.36.3,<0.37"
@@ -58,18 +58,26 @@ ninja = ">=1.11"
 setuptools = "<80"
 wheel = "*"
 pytest = ">=9.1.1,<10"
+av = "*"
+ffmpeg = "*"
+datafusion = "==54.0.0"
+typing-extensions = ">=4.1,<4.16"
 
 [pypi-dependencies]
 # PyPI torch wheels bundle the CUDA 13.0 runtime; host only needs a driver.
 torch = "==2.13.0"
 torchvision = "==0.28.0"
 torchmetrics = ">=1.4"
+# No conda TorchCodec build can coexist with both CUDA 13 PyPI torch and
+# conda datafusion 54 (libtorch's protobuf 7 conflicts with datafusion's 6).
+torchcodec = "==0.16.0"
 # Trajectory evaluation (evo_ape) against the dataset's ground-truth poses.
 evo = ">=1.28"
 # MoGe-2 prior (vendored, pinned) from the rerun examples monorepo; sam3 is its
 # sibling package that monopriors declares as a dependency.
 sam3 = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "ab4f8441d21388667f2f3a825f2a533f203444b2", subdirectory = "packages/sam3" }
 monopriors = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "ab4f8441d21388667f2f3a825f2a533f203444b2", subdirectory = "packages/monoprior" }
+simplecv = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "ab4f8441d21388667f2f3a825f2a533f203444b2", subdirectory = "packages/simplecv" }
 
 # ── CUDA extension builds (setuptools build_ext, no pip; .so files land in-tree) ──
 [tasks._build-droid-lietorch]
@@ -124,6 +132,11 @@ description = "Run MCGS-SLAM on the example sequence, logging to a Rerun .rrd"
 cmd = "pytest -q tests"
 depends-on = ["build"]
 description = "Unit tests (image stream needs the example sequence downloaded)"
+
+[tasks.test-integration]
+cmd = "pytest -q -o addopts= -m integration tests/integration"
+depends-on = ["build"]
+description = "Live robocap catalog and torchcodec decode smoke test"
 
 [tasks.ate]
 cmd = "evo_ape tum data/100613/gt_poses.txt output/100613/traj_mcgs.txt -as"

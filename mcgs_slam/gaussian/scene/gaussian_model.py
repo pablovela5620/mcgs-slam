@@ -118,12 +118,16 @@ class GaussianModel:
         point_size = self.config["Dataset"]["point_size"]
         if "adaptive_pointsize" in self.config["Dataset"]:
             if self.config["Dataset"]["adaptive_pointsize"]:
-                point_size = min(0.05, point_size * np.median(depth))
+                depth_values = np.asarray(depth)
+                valid_depth = depth_values[np.isfinite(depth_values) & (depth_values > 0.0)]
+                median_depth = float(np.median(valid_depth)) if valid_depth.size else 1.0
+                adaptive_max = float(self.config["Dataset"].get("adaptive_pointsize_max", 0.05))
+                point_size = min(adaptive_max, point_size * median_depth)
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb,
             depth,
             depth_scale=1.0,
-            depth_trunc=100.0,
+            depth_trunc=float(self.config["Dataset"].get("depth_trunc", 100.0)),
             convert_rgb_to_intensity=False,
         )
 
