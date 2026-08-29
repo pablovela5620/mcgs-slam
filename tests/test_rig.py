@@ -123,6 +123,7 @@ class _SyntheticVideo:
     def __init__(self, frame_count: int) -> None:
         self.counter: SimpleNamespace = SimpleNamespace(value=frame_count)
         self.ds: torch.Tensor | None = None
+        self.nets: torch.Tensor = torch.zeros((frame_count, 1, 2), dtype=torch.float32)
 
     def distance(
         self,
@@ -133,6 +134,17 @@ class _SyntheticVideo:
         """Return finite distances for all candidate frame pairs."""
         del jj, beta
         return torch.zeros_like(ii, dtype=torch.float32)
+
+    def reproject(
+        self,
+        ii: torch.Tensor,
+        jj: torch.Tensor,
+        camera_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return zero flow at the mapper's expected factor shape."""
+        del jj, camera_index
+        target: torch.Tensor = torch.zeros((1, len(ii), 1, 1, 2), dtype=torch.float32)
+        return target, torch.ones_like(target)
 
 
 def _edge_builder(frame_count: int = 6) -> tuple[FactorGraph, list[tuple[torch.Tensor, torch.Tensor]]]:
@@ -156,6 +168,28 @@ def _edge_builder(frame_count: int = 6) -> tuple[FactorGraph, list[tuple[torch.T
     return graph, captured
 
 
+def _real_edge_graph(frame_count: int = 6) -> FactorGraph:
+    """Create a CPU factor graph that stores edges without a correlation volume."""
+    graph: FactorGraph = FactorGraph.__new__(FactorGraph)
+    graph.video = _SyntheticVideo(frame_count)
+    graph.device = "cpu"
+    graph.index = 0
+    graph.max_factors = 1_000
+    graph.corr_impl = "none"
+    graph.ii = torch.empty(0, dtype=torch.long)
+    graph.jj = torch.empty(0, dtype=torch.long)
+    graph.age = torch.empty(0, dtype=torch.long)
+    graph.ii_inac = torch.empty(0, dtype=torch.long)
+    graph.jj_inac = torch.empty(0, dtype=torch.long)
+    graph.eset = set()
+    graph.corr = None
+    graph.net = None
+    graph.inp = None
+    graph.target = torch.zeros((1, 0, 1, 1, 2), dtype=torch.float32)
+    graph.weight = torch.zeros((1, 0, 1, 1, 2), dtype=torch.float32)
+    return graph
+
+
 def test_factor_builders_never_emit_self_edges() -> None:
     graph, captured = _edge_builder()
     graph.add_neighborhood_factors(0, 6, r=2)
@@ -173,6 +207,33 @@ def test_factor_builders_never_emit_self_edges() -> None:
     assert captured
     for ii, jj in captured:
         assert torch.all(ii != jj), (ii, jj)
+
+
+def test_every_factor_builder_honors_minimum_temporal_gap() -> None:
+    neighborhood: FactorGraph = _real_edge_graph()
+    neighborhood.add_neighborhood_factors(0, 6, r=3)
+
+    frontend: FactorGraph = _real_edge_graph()
+    frontend.add_proximity_factors(rad=2, nms=1, thresh=16.0)
+
+    backend: FactorGraph = _real_edge_graph()
+    backend.add_proximity_factors_backend(
+        t=6,
+        rad=2,
+        nms=1,
+        beta=0.25,
+        thresh=16.0,
+        framedist=1,
+        relset=set(),
+    )
+
+    for graph in (neighborhood, frontend, backend):
+        temporal_gaps: torch.Tensor = (graph.ii - graph.jj).abs()
+        assert temporal_gaps.numel() > 0
+        assert torch.all(temporal_gaps >= FactorGraph.MIN_TEMPORAL_GAP), (
+            graph.ii,
+            graph.jj,
+        )
 
 
 def test_add_factors_rejects_a_self_edge() -> None:

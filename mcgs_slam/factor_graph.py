@@ -86,6 +86,10 @@ class FactorGraph:
         # use their calibrated extrinsics directly.
         assert torch.all(ii != jj), "self-edge reached FactorGraph.add_factors"
 
+        temporal_gap = (ii - jj).abs()
+        admissible = temporal_gap >= self.MIN_TEMPORAL_GAP
+        ii, jj = ii[admissible], jj[admissible]
+
         # remove duplicate edges
         ii, jj = self.__filter_repeated_edges(ii, jj)
 
