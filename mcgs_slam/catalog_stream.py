@@ -37,6 +37,18 @@ KEYFRAME_PREROLL_NS: int = 1_100_000_000
 DecoderDevice: TypeAlias = Literal["cuda", "cpu"]
 
 
+
+def _scalar_str(value: Any) -> str:
+    """Return a catalog string component as a plain string.
+
+    Rerun stores single-instance string components as one-element lists, and
+    simplecv's ``first_valid_value`` only unwraps nested lists, so ``['left_front']``
+    would otherwise become the literal text ``"['left_front']"``.
+    """
+    while isinstance(value, list | tuple) and len(value) == 1:
+        value = value[0]
+    return str(value)
+
 def catalog_camera_path(camera_id: int) -> str:
     """Return the canonical exoego:v2 entity path for a camera."""
     return f"{RIG_PATH}/{entity_id('cam', camera_id)}"
@@ -489,7 +501,7 @@ class RobocapSegment:
             camera_path = catalog_camera_path(camera_id)
             pinhole_path: str = f"{camera_path}/pinhole"
             name_component: str = f"{camera_path}:name"
-            name: str = str(
+            name: str = _scalar_str(
                 first_valid_value(table.column(name_component), component_name=name_component)
             )
             matrix_component: str = f"{camera_path}:Transform3D:mat3x3"
@@ -532,7 +544,7 @@ class RobocapSegment:
             ]
             kind_component: str = f"{camera_path}:kind"
             kind_value: str = (
-                str(
+                _scalar_str(
                     first_valid_value(
                         table.column(kind_component),
                         allow_none=True,

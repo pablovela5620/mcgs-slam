@@ -193,3 +193,11 @@ def test_catalog_segment_requires_endpoint_dataset_and_segment() -> None:
 def test_catalog_camera_paths_use_simplecv_zero_padding() -> None:
     assert catalog_camera_path(1) == "/world/rig_00/cam_01"
     assert catalog_camera_path(10) == "/world/rig_00/cam_10"
+
+
+def test_scalar_str_unwraps_single_instance_components() -> None:
+    from catalog_stream import _scalar_str
+
+    assert _scalar_str(["left_front"]) == "left_front"
+    assert _scalar_str([["rgb"]]) == "rgb"
+    assert _scalar_str("plain") == "plain"
