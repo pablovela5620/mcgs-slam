@@ -17,6 +17,7 @@ from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
 from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
+from camera_packet import CameraPacket, GlobalCameraPacket
 try:
     from gaussian.gui import gui_utils, slam_gui
 except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
@@ -137,29 +138,28 @@ class GSBackEnd(mp.Process):
             )
         return self.camera_projections[cam_idx]
 
-    def process_track_data(self, packet):
+    def process_track_data(self, packet: CameraPacket):
         H, W = packet["images"].shape[-2:]
         cam_idx = int(packet.get('cam_idx', 0))
         projection = self._projection_for_camera(cam_idx, packet["intrinsics"][0], (H, W))
         w2c = SE3(packet["poses"]).matrix().cuda()
-        for i, idx in enumerate(packet['viz_idx']):
-            idx = idx.item()
-            idx = packet['tstamp'][i].item()
-            tstamp = packet['tstamp'][i].item()
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, projection.matrix, projection.K, tstamp, cam_idx=cam_idx)
-            if idx not in self.current_window:
-                self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
+        for i, view_id_tensor in enumerate(packet["view_ids"]):
+            view_id: int = int(view_id_tensor.item())
+            frame_id: int = int(packet["frame_ids"][i].item())
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], view_id, projection.matrix, projection.K, frame_id, cam_idx=cam_idx)
+            if view_id not in self.current_window:
+                self.current_window = [view_id] + self.current_window[:-1] if len(self.current_window) > 10 else [view_id] + self.current_window
                 if not self.initialized:
                     self.reset()
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(0, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
-                    self.initialize_map(0, viewpoint)
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
+                    self.initialize_map(view_id, viewpoint)
                     self.initialized = True
-                elif idx not in self.viewpoints:
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(idx, viewpoint, depth_map=packet["depths"][i].numpy())
+                elif view_id not in self.viewpoints:
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][i].numpy())
                 else:
-                    self.viewpoints[idx] = viewpoint
+                    self.viewpoints[view_id] = viewpoint
 
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
@@ -180,13 +180,20 @@ class GSBackEnd(mp.Process):
                     gtcolor=viewpoint.original_image,
                     gtdepth=viewpoint.depth.numpy()))
 
-    def process_global_track_data(self, packet, cam_num):
-        if packet['pose_updates'] is not None:
+    def process_global_track_data(self, packet: GlobalCameraPacket):
+        if packet["pose_updates"] is not None:
             with torch.no_grad():
-                tstamps = packet['tstamp']
-                indices = (tstamps.unsqueeze(1) == self.gaussians.unique_kfIDs.unsqueeze(0)).nonzero()[:, 0] % int(tstamps.shape[0] / cam_num)
-                updates = packet['pose_updates'].cuda()[indices]
-                updates_scale = packet['scale_updates'].cuda()[indices]
+                view_ids = packet["view_ids"]
+                pose_updates = packet["pose_updates"]
+                scale_updates = packet["scale_updates"]
+                if scale_updates is None:
+                    raise ValueError("scale_updates are required when pose_updates are supplied")
+                packet_indices = (
+                    view_ids.unsqueeze(1) == self.gaussians.unique_kfIDs.unsqueeze(0)
+                ).nonzero()[:, 0]
+                pose_indices = packet_indices % len(pose_updates)
+                updates = pose_updates.cuda()[pose_indices]
+                updates_scale = scale_updates.cuda()[pose_indices]
                 
                 xyz = self.gaussians.get_xyz
                 xyz = (updates * xyz) / updates_scale
@@ -202,26 +209,25 @@ class GSBackEnd(mp.Process):
 
         H, W = packet["images"].shape[-2:]
         w2c = SE3(packet["poses"]).matrix().cuda()
-        for i, idx in enumerate(packet['viz_idx']):
-            idx = idx.item()
-            idx = packet['tstamp'][i].item()
-            tstamp = packet['tstamp'][i].item()
-            cam_idx = int(packet["cam_idx"][i])
+        for i, view_id_tensor in enumerate(packet["view_ids"]):
+            view_id: int = int(view_id_tensor.item())
+            frame_id: int = int(packet["frame_ids"][i].item())
+            cam_idx = int(packet["cam_indices"][i])
             projection = self._projection_for_camera(cam_idx, packet["intrinsics"][i], (H, W))
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, projection.matrix, projection.K, tstamp, cam_idx=cam_idx)
-            if idx not in self.current_window:
-                self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], view_id, projection.matrix, projection.K, frame_id, cam_idx=cam_idx)
+            if view_id not in self.current_window:
+                self.current_window = [view_id] + self.current_window[:-1] if len(self.current_window) > 10 else [view_id] + self.current_window
                 if not self.initialized:
                     self.reset()
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(0, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
-                    self.initialize_map(0, viewpoint)
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
+                    self.initialize_map(view_id, viewpoint)
                     self.initialized = True
-                elif idx not in self.viewpoints:
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(idx, viewpoint, depth_map=packet["depths"][i].numpy())
+                elif view_id not in self.viewpoints:
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][i].numpy())
                 else:
-                    self.viewpoints[idx] = viewpoint
+                    self.viewpoints[view_id] = viewpoint
 
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)

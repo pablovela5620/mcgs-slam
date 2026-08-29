@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """Map one robocap catalog window with Basalt poses and MoGe-2 geometry."""
 
-import os  # nopep8
-import sys  # nopep8
+from mcgs_slam._paths import configure_import_paths  # nopep8
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))  # nopep8
-sys.path.append(os.path.join(_ROOT, "mcgs_slam"))  # nopep8
-# CUDA extensions are built in-place by `pixi run build` (see pixi.toml).
-sys.path.append(os.path.join(_ROOT, "thirdparty/lietorch"))  # nopep8
-sys.path.append(os.path.join(_ROOT, "thirdparty/simple-knn"))  # nopep8
-sys.path.append(os.path.join(_ROOT, "thirdparty/diff-gaussian-rasterization"))  # nopep8
+configure_import_paths()  # nopep8
 
 import json
 import time
@@ -25,7 +19,7 @@ import tyro
 
 from catalog_stream import CATALOG_URL, DATASET_ID, SEGMENT_ID, CatalogKeyframe, RobocapSegment
 from gs_backend import GSBackEnd
-from mcgs import CameraPacket, build_camera_packet
+from camera_packet import CameraPacket, build_camera_packet, merge_camera_packets
 from prior import MoGePrior, PriorPrediction
 from rerun_logger import RerunLogger
 from utils.utils import load_config
@@ -57,32 +51,6 @@ class CatalogConfig:
     """Final Gaussian color-refinement iterations."""
     config: Path = Path("config/config_robocap.yaml")
     """Metric Gaussian mapper configuration."""
-
-
-def _merge_packets(packets: list[CameraPacket]) -> dict[str, object]:
-    """Stack per-view packets for the backend's final re-registration pass."""
-    tensor_keys: tuple[str, ...] = (
-        "viz_idx",
-        "tstamp",
-        "poses",
-        "images",
-        "normals",
-        "depths",
-        "intrinsics",
-    )
-    merged: dict[str, object] = {
-        key: torch.cat([packet[key] for packet in packets], dim=0)
-        for key in tensor_keys
-    }
-    merged["cam_idx"] = torch.cat(
-        [
-            torch.full_like(packet["viz_idx"], packet["cam_idx"], dtype=torch.long)
-            for packet in packets
-        ]
-    )
-    merged["pose_updates"] = None
-    merged["scale_updates"] = None
-    return merged
 
 
 def run(config: CatalogConfig) -> dict[str, float | int | str]:
@@ -160,14 +128,15 @@ def run(config: CatalogConfig) -> dict[str, float | int | str]:
         viz_idx: torch.Tensor = torch.tensor([keyframe_count], dtype=torch.long)
         for cam_idx in range(len(segment.calibrations)):
             packet: CameraPacket = build_camera_packet(
-                viz_idx=viz_idx,
+                frame_ids=viz_idx,
                 cam_idx=cam_idx,
+                n_cameras=len(segment.calibrations),
                 poses_camera_from_world_n7=frame.camera_from_world[cam_idx : cam_idx + 1],
                 images_rgb_n3hw=frame.images_rgb[cam_idx : cam_idx + 1],
                 depth_metres_nhw=prediction.depth[cam_idx : cam_idx + 1],
                 normals_n3hw=prediction.normal[cam_idx : cam_idx + 1],
                 intrinsics_n4=frame.virtual_K[cam_idx : cam_idx + 1],
-                scale_factor=1.0,
+                map_scale=1.0,
             )
             backend.process_track_data(packet)
             packets.append(packet)
@@ -179,7 +148,7 @@ def run(config: CatalogConfig) -> dict[str, float | int | str]:
             f"gaussians={backend.gaussians.get_xyz.shape[0]}"
         )
 
-    backend.process_global_track_data(_merge_packets(packets), len(segment.calibrations))
+    backend.process_global_track_data(merge_camera_packets(packets))
     backend.finalize()
     quality: dict[str, float] = backend.eval_rendering_kf()
     rr_logger.send_final_blueprint()

@@ -2,9 +2,7 @@ import os
 import cv2
 import torch
 import lietorch
-from prior_mask import mask_invalid_depth
 import numpy as np
-from typing import TypedDict
 
 from droid_net import DroidNet
 from depth_video import DepthVideo
@@ -17,87 +15,17 @@ from torch.multiprocessing import Process
 from tqdm import trange
 
 from gs_backend import GSBackEnd
+from camera_packet import CameraPacket, build_camera_packet, merge_camera_packets
 from utils.utils import load_config
-
-class CameraPacket(TypedDict):
-    """One camera's tracking data passed to the Gaussian backend."""
-
-    viz_idx: torch.Tensor
-    tstamp: torch.Tensor
-    poses: torch.Tensor
-    images: torch.Tensor
-    normals: torch.Tensor
-    depths: torch.Tensor
-    intrinsics: torch.Tensor
-    cam_idx: int
-    pose_updates: torch.Tensor | lietorch.SE3 | None
-    scale_updates: torch.Tensor | None
-
-
-def build_camera_packet(
-    *,
-    viz_idx: torch.Tensor,
-    cam_idx: int,
-    poses_camera_from_world_n7: torch.Tensor,
-    images_rgb_n3hw: torch.Tensor,
-    depth_metres_nhw: torch.Tensor,
-    normals_n3hw: torch.Tensor,
-    intrinsics_n4: torch.Tensor,
-    scale_factor: float = 0.2,
-    pose_updates: torch.Tensor | lietorch.SE3 | None = None,
-    scale_updates: torch.Tensor | None = None,
-) -> CameraPacket:
-    """Build one Gaussian-backend packet from trusted camera observations.
-
-    Args:
-        viz_idx: Int64 mapper keyframe indices with shape ``[n]``.
-        cam_idx: Camera index used for the unique ``+500*cam_idx`` viewpoint key.
-        poses_camera_from_world_n7: Float32 lietorch ``T_camera_from_world``
-            vectors with shape ``[n, 7]`` and metric translations.
-        images_rgb_n3hw: UInt8 RGB images with shape ``[n, 3, h, w]``.
-        depth_metres_nhw: Float32 metric depth with shape ``[n, h, w]``.
-        normals_n3hw: Float32 camera-frame normals with shape ``[n, 3, h, w]``;
-            a zero normal marks invalid prior geometry.
-        intrinsics_n4: Float32 virtual-pinhole ``[fx, fy, cx, cy]`` values with
-            shape ``[n, 4]``.
-        scale_factor: Translation and depth scale into Gaussian-map units.
-        pose_updates: Optional pose correction used only by the legacy global path.
-        scale_updates: Optional scale correction used only by the legacy global path.
-
-    Returns:
-        Canonical CPU packet consumed by :class:`GSBackEnd`.
-    """
-    poses_scaled_n7: torch.Tensor = poses_camera_from_world_n7.detach().to(
-        device="cpu", dtype=torch.float32
-    ).clone()
-    poses_scaled_n7[:, :3] *= scale_factor
-    depth_scaled_nhw: torch.Tensor = depth_metres_nhw.detach().to(
-        device="cpu", dtype=torch.float32
-    ) * scale_factor
-    return {
-        "viz_idx": viz_idx.detach().to(device="cpu", dtype=torch.long),
-        "tstamp": viz_idx.detach().to(device="cpu", dtype=torch.long) + 500 * cam_idx,
-        "poses": poses_scaled_n7,
-        "images": images_rgb_n3hw.detach().to(device="cpu", dtype=torch.uint8),
-        "normals": normals_n3hw.detach().to(device="cpu", dtype=torch.float32),
-        "depths": mask_invalid_depth(
-            depth_scaled_nhw,
-            normals_n3hw.detach().to(device="cpu", dtype=torch.float32),
-        ),
-        "intrinsics": intrinsics_n4.detach().to(device="cpu", dtype=torch.float32),
-        "cam_idx": cam_idx,
-        "pose_updates": pose_updates.to(device="cpu") if pose_updates is not None else None,
-        "scale_updates": scale_updates.to(device="cpu") if scale_updates is not None else None,
-    }
 
 
 class Mcgs:
-    def __init__(self, args, video=None, rr_logger=None, scale_factor: float = 0.2):
+    def __init__(self, args, map_scale: float, video=None, rr_logger=None):
         super(Mcgs, self).__init__()
         self.load_weights(args.weights)
         self.args = args
         self.config = load_config(args.config)
-        self.scale_factor = scale_factor
+        self.map_scale = map_scale
         self.rr = rr_logger
 
         # store images, depth, poses, intrinsics (shared between processes)
@@ -148,15 +76,14 @@ class Mcgs:
         self,
         viz_idx: torch.Tensor,
         cam_idx: int,
-        dposes: torch.Tensor | lietorch.SE3 | None,
-        dscales: torch.Tensor | None,
     ) -> CameraPacket:
         """Build the canonical Gaussian-backend packet for one rig camera."""
         poses_c0_w = lietorch.SE3(self.video.poses[viz_idx].to(device="cpu")[None])
         poses_ci_w = (self.video.T_ci_c0[cam_idx].cpu() * poses_c0_w).data[0]
         return build_camera_packet(
-            viz_idx=viz_idx,
+            frame_ids=self.video.tstamp[viz_idx].to(device="cpu", dtype=torch.long),
             cam_idx=cam_idx,
+            n_cameras=self.video.multi,
             poses_camera_from_world_n7=poses_ci_w,
             images_rgb_n3hw=self.video.images_up_list[cam_idx][viz_idx.cpu()],
             depth_metres_nhw=(
@@ -164,9 +91,7 @@ class Mcgs:
             ),
             normals_n3hw=self.video.normals_list[cam_idx][viz_idx.cpu()],
             intrinsics_n4=self.video.K(cam_idx)[0, viz_idx].to(device="cpu")[:, :4] * 8,
-            scale_factor=self.scale_factor,
-            pose_updates=dposes,
-            scale_updates=dscales,
+            map_scale=self.map_scale,
         )
 
     def call_gs(self, viz_idx, dposes=None, dscale=None):
@@ -175,7 +100,7 @@ class Mcgs:
             self.rr.log_keyframe(self.video, viz_idx)
 
         for cam_idx in range(self.video.multi):
-            self.gs.process_track_data(self._camera_packet(viz_idx, cam_idx, dposes, dscale))
+            self.gs.process_track_data(self._camera_packet(viz_idx, cam_idx))
 
         # One splat snapshot per keyframe update (cadence inside the logger),
         # after every camera's packet has refined the map.
@@ -188,24 +113,21 @@ class Mcgs:
             self.rr.log_keyframe(self.video, viz_idx)
 
         packets: list[CameraPacket] = [
-            self._camera_packet(viz_idx, cam_idx, dposes, dscale)
+            self._camera_packet(viz_idx, cam_idx)
             for cam_idx in range(self.video.multi)
         ]
-        tensor_keys: tuple[str, ...] = (
-            "viz_idx", "tstamp", "poses", "images", "normals", "depths", "intrinsics"
+        pose_updates = (
+            lietorch.SE3(self._scale_poses(dposes.to(device="cpu").data, self.map_scale))
+            if dposes is not None
+            else None
         )
-        final_data: dict[str, object] = {
-            key: torch.cat([packet[key] for packet in packets], dim=0)
-            for key in tensor_keys
-        }
-        final_data["cam_idx"] = torch.cat([
-            torch.full_like(packet["viz_idx"], packet["cam_idx"], dtype=torch.long)
-            for packet in packets
-        ])
-        final_data['pose_updates'] = lietorch.SE3(self._scale_poses(dposes.to(device='cpu').data, self.scale_factor)) if dposes is not None else None
-        final_data['scale_updates'] = dscale.to(device='cpu') if dscale is not None else None
-            
-        self.gs.process_global_track_data(final_data, self.video.multi)
+        final_data = merge_camera_packets(
+            packets,
+            pose_updates=pose_updates,
+            scale_updates=dscale,
+        )
+
+        self.gs.process_global_track_data(final_data)
 
         if self.rr is not None:
             self.rr.log_gaussians(self.gs.gaussians, force=True)

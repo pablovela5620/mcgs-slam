@@ -1,13 +1,9 @@
 #!/home/wei/miniconda3/envs/mcgs/bin/python
-import os    # nopep8
-import sys   # nopep8
-_ROOT = os.path.dirname(os.path.abspath(__file__))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'mcgs_slam'))   # nopep8
-# CUDA extensions are built in-place by `pixi run build` (see pixi.toml).
-sys.path.append(os.path.join(_ROOT, 'thirdparty/lietorch'))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'thirdparty/simple-knn'))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'thirdparty/diff-gaussian-rasterization'))   # nopep8
+from mcgs_slam._paths import configure_import_paths  # nopep8
 
+configure_import_paths()  # nopep8
+
+import os
 import cv2
 import time
 import torch
@@ -48,7 +44,7 @@ if __name__ == '__main__':
                                 save_path=args.rrd, spawn=args.rerun_spawn,
                                 splat_every=args.rr_splat_every)
 
-    mcgs = Mcgs(args, rr_logger=rr_logger)
+    mcgs = Mcgs(args, map_scale=0.2, rr_logger=rr_logger)
     tstamps = {}
     t0 = time.time()
     N = len(os.listdir(args.imagedir[0])[::args.stride])
