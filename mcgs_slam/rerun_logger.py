@@ -129,14 +129,23 @@ class RerunLogger:
         if any(len(paths) != camera_count for paths in path_groups):
             raise ValueError("dashboard paths must match the logged camera count")
 
-        image_views: list[rrb.Spatial2DView] = [
-            rrb.Spatial2DView(
-                origin=spec.image_origins[index],
-                name=self.cam_names[index],
-                contents=spec.image_contents,
-            )
-            for index in range(camera_count)
-        ]
+        if spec.image_contents is None:
+            image_views: list[rrb.Spatial2DView] = [
+                rrb.Spatial2DView(
+                    origin=spec.image_origins[index],
+                    name=self.cam_names[index],
+                )
+                for index in range(camera_count)
+            ]
+        else:
+            image_views = [
+                rrb.Spatial2DView(
+                    origin=spec.image_origins[index],
+                    name=self.cam_names[index],
+                    contents=spec.image_contents,
+                )
+                for index in range(camera_count)
+            ]
         depth_views: list[rrb.Spatial2DView] = [
             rrb.Spatial2DView(
                 origin=spec.depth_origins[index],
