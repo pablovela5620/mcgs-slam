@@ -1,5 +1,6 @@
 """Schema-neutral Rerun logger contracts."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,30 @@ import rerun as rr
 import torch
 
 from rerun_logger import RerunLogger
+
+
+def test_base_initialization_does_not_build_overridable_blueprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(
+        logger: RerunLogger,
+        eye_controls: object | None = None,
+    ) -> None:
+        del logger, eye_controls
+        raise AssertionError("blueprint called during base initialization")
+
+    monkeypatch.setattr(RerunLogger, "_blueprint", fail_if_called)
+    logger = RerunLogger(
+        camera_names=["camera"],
+        camera_ids=[0],
+        map_scale=1.0,
+        world_coordinates=rr.ViewCoordinates.RDF,
+        save_path=str(tmp_path / "base-init.rrd"),
+    )
+
+    logger.flush()
+    rr.get_global_data_recording().disconnect()
 
 
 @pytest.mark.parametrize("scales", [[[0.1, 0.1, 0.1]], [[0.1, 0.1, 0.1]] * 3])

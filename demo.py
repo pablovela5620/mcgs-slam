@@ -50,6 +50,7 @@ if __name__ == '__main__':
             spawn=args.rerun_spawn,
             splat_every=args.rr_splat_every,
         )
+        rr_logger.send_blueprint()
 
     mcgs = Mcgs(args, map_scale=MAP_SCALE, rr_logger=rr_logger)
     tstamps = {}

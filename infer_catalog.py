@@ -104,6 +104,7 @@ def run(config: CatalogConfig) -> dict[str, float | int | str]:
         trajectory_radius=0.04,
         splat_every=4,
     )
+    rr_logger.send_blueprint()
 
     prior = MoGePrior("vits", resolution_level=3, device="cuda")
     backend = GSBackEnd(mapper_config, str(config.output), use_gui=False, rr_logger=rr_logger)

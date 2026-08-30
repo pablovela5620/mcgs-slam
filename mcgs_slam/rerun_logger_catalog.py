@@ -10,13 +10,13 @@ import torch
 from einops import rearrange
 from jaxtyping import Float, UInt8
 from simplecv.camera_parameters import PinholeParameters
-from simplecv.rerun_log_utils import log_pinhole
+from simplecv.rerun_log_utils import PinholeWithDistortion, log_pinhole
 from simplecv.rerun_rig_logger import SCHEMA_VERSION
 from simplecv.rig import RigCalibration, entity_id
 from torch import Tensor
 
 from prior_mask import prior_valid
-from rerun_logger import RerunLogger
+from rerun_logger import DashboardSpec, RerunLogger
 
 if TYPE_CHECKING:
     from catalog_stream import CatalogKeyframe, RawVideoStream
@@ -51,7 +51,7 @@ class CatalogRerunLogger(RerunLogger):
             raise ValueError("rectified_cameras must match rig_calibration.cameras")
         self.rig_calibration: RigCalibration = rig_calibration
         self.rectified_cameras: tuple[PinholeParameters, ...] = rectified_cameras
-        self._previous_center: Float[np.ndarray, "3"] | None = None
+        self._trajectory_centers: list[Float[np.ndarray, "3"]] = []
         super().__init__(
             camera_names=[camera.name for camera in rig_calibration.cameras],
             camera_ids=[camera.index for camera in rig_calibration.cameras],
@@ -95,79 +95,37 @@ class CatalogRerunLogger(RerunLogger):
         del cam_idx
         return None
 
-    def _blueprint(
-        self,
-        eye_controls: rrb.EyeControls3D | None = None,
-    ) -> rrb.Blueprint:
-        image_views: list[rrb.Spatial2DView] = [
-            rrb.Spatial2DView(
-                origin=self._video_path(index),
-                name=self.cam_names[index],
-            )
-            for index in range(len(self.cam_names))
-        ]
-        depth_views: list[rrb.Spatial2DView] = [
-            rrb.Spatial2DView(
-                origin=self._depth_path(index),
-                name=f"{self.cam_names[index]} depth",
-            )
-            for index in range(len(self.cam_names))
-        ]
-        compare_views: list[object] = [
-            rrb.Vertical(
-                rrb.Spatial2DView(
-                    origin=self._render_path(index),
-                    name=f"{self.cam_names[index]} render",
-                ),
-                rrb.Spatial2DView(
-                    origin=self._image_path(index),
-                    name=f"{self.cam_names[index]} GT",
-                ),
-                name=self.cam_names[index],
-            )
-            for index in range(len(self.cam_names))
-        ]
-        contents_3d: list[str] = (
-            ["+ /**"]
-            + [f"- {self._pinhole_path(index)}" for index in range(len(self.cam_names))]
-            + [f"- {self._video_path(index)}" for index in range(len(self.cam_names))]
-            + [f"- {self._image_path(index)}" for index in range(len(self.cam_names))]
-            + [f"- {self._depth_path(index)}" for index in range(len(self.cam_names))]
-            + [f"- {self._render_path(index)}" for index in range(len(self.cam_names))]
-        )
-        follow_eye = rrb.EyeControls3D(
-            kind=rrb.Eye3DKind.Orbital,
-            position=(0.0, -0.6, -0.35),
-            look_target=(0.0, 2.0, 0.1),
-            eye_up=(0.0, 0.0, -1.0),
-            spin_speed=0.0,
-        )
-        return rrb.Blueprint(
-            rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.Spatial3DView(
-                        origin="/",
-                        name="3D map",
-                        contents=contents_3d,
-                        eye_controls=eye_controls,
-                    ),
-                    rrb.Spatial3DView(
-                        name="Follow",
-                        origin=CATALOG_RIG_PATH,
-                        contents=contents_3d,
-                        eye_controls=follow_eye,
-                    ),
-                    row_shares=[3.0, 2.0],
-                ),
-                rrb.Vertical(
-                    rrb.Horizontal(*compare_views, name="render vs GT"),
-                    rrb.Horizontal(*image_views),
-                    rrb.Horizontal(*depth_views),
-                    row_shares=[2.0, 1.0, 1.0],
-                ),
-                column_shares=[3, 2],
+    def _dashboard_spec(self) -> DashboardSpec:
+        """Return Catalog entity paths and RFU follow-view controls."""
+        camera_indices: range = range(len(self.cam_names))
+        return DashboardSpec(
+            image_origins=tuple(self._video_path(index) for index in camera_indices),
+            image_contents=None,
+            depth_origins=tuple(self._depth_path(index) for index in camera_indices),
+            render_origins=tuple(self._render_path(index) for index in camera_indices),
+            ground_truth_origins=tuple(
+                self._image_path(index) for index in camera_indices
             ),
-            collapse_panels=True,
+            excluded_3d_paths=tuple(
+                path
+                for index in camera_indices
+                for path in (
+                    self._pinhole_path(index),
+                    self._video_path(index),
+                    self._image_path(index),
+                    self._depth_path(index),
+                    self._render_path(index),
+                )
+            ),
+            follow_origin=CATALOG_RIG_PATH,
+            follow_exclusions=(),
+            follow_eye=rrb.EyeControls3D(
+                kind=rrb.Eye3DKind.Orbital,
+                position=(0.0, -0.6, -0.35),
+                look_target=(0.0, 2.0, 0.1),
+                eye_up=(0.0, 0.0, -1.0),
+                spin_speed=0.0,
+            ),
         )
 
     def log_catalog_calibration(self) -> None:
@@ -204,12 +162,23 @@ class CatalogRerunLogger(RerunLogger):
                 rr.AnyValues(name=camera.name, kind=camera.kind),
                 static=True,
             )
-            log_pinhole(
-                rectified_camera,
-                cam_log_path=Path(self._rectified_path(cam_idx)),
-                image_plane_distance=self.image_plane_distance,
+            rr.log(
+                self._rectified_path(cam_idx),
+                rr.Transform3D(
+                    translation=rectified_camera.extrinsics.cam_t_world,
+                    mat3x3=rectified_camera.extrinsics.cam_R_world,
+                    relation=rr.TransformRelation.ChildFromParent,
+                ),
                 static=True,
-                include_distortion=False,
+            )
+            rr.log(
+                self._rectified_path(cam_idx),
+                PinholeWithDistortion.from_camera(
+                    rectified_camera,
+                    image_plane_distance=self.image_plane_distance,
+                    include_distortion=False,
+                ),
+                static=True,
             )
 
     def relay_video_streams(self, streams: Sequence["RawVideoStream"]) -> None:
@@ -237,7 +206,7 @@ class CatalogRerunLogger(RerunLogger):
         depth_metres_nhw: Float[Tensor, "n_cams h w"],
         normals_n3hw: Float[Tensor, "n_cams 3 h w"],
     ) -> None:
-        """Log one trusted rig pose, an incremental path segment, images, and depth."""
+        """Log one trusted rig pose, accumulated trajectory, images, and depth."""
         rr.set_time("frame", sequence=frame_idx)
         rr.set_time(
             "video_time",
@@ -254,23 +223,16 @@ class CatalogRerunLogger(RerunLogger):
         center_3: Float[np.ndarray, "3"] = world_from_rig_44[:3, 3].astype(
             np.float32, copy=True
         )
-        segment_23: Float[np.ndarray, "2 3"] = np.stack(
-            [
-                self._previous_center
-                if self._previous_center is not None
-                else center_3,
-                center_3,
-            ]
-        )
+        self._trajectory_centers.append(center_3)
+        centers_n3: Float[np.ndarray, "n 3"] = np.stack(self._trajectory_centers)
         rr.log(
             "world/trajectory",
             rr.LineStrips3D(
-                [segment_23],
+                [centers_n3],
                 colors=[[0, 200, 255]],
                 radii=self.trajectory_radius,
             ),
         )
-        self._previous_center = center_3
         self._record_trajectory(center_3[None])
 
         valid_nhw: Tensor = prior_valid(normals_n3hw.detach().cpu())

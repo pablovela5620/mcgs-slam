@@ -13,7 +13,7 @@ from lietorch import SE3
 from torch import Tensor
 
 from prior_mask import prior_valid
-from rerun_logger import RerunLogger
+from rerun_logger import DashboardSpec, RerunLogger
 
 if TYPE_CHECKING:
     from depth_video import DepthVideo
@@ -100,77 +100,31 @@ class WaymoRerunLogger(RerunLogger):
     def _ground_truth_path(self, cam_idx: int) -> str:
         return f"{self._compare_path(cam_idx)}/gt"
 
-    def _blueprint(
-        self,
-        eye_controls: rrb.EyeControls3D | None = None,
-    ) -> rrb.Blueprint:
-        image_views: list[rrb.Spatial2DView] = [
-            rrb.Spatial2DView(
-                origin=self._pinhole_path(index),
-                name=self.cam_names[index],
-                contents=["+ $origin/image"],
-            )
-            for index in range(len(self.cam_names))
-        ]
-        depth_views: list[rrb.Spatial2DView] = [
-            rrb.Spatial2DView(
-                origin=self._depth_path(index),
-                name=f"{self.cam_names[index]} depth",
-            )
-            for index in range(len(self.cam_names))
-        ]
-        compare_views: list[object] = [
-            rrb.Vertical(
-                rrb.Spatial2DView(
-                    origin=self._render_path(index),
-                    name=f"{self.cam_names[index]} render",
-                ),
-                rrb.Spatial2DView(
-                    origin=self._ground_truth_path(index),
-                    name=f"{self.cam_names[index]} GT",
-                ),
-                name=self.cam_names[index],
-            )
-            for index in range(len(self.cam_names))
-        ]
-        contents_3d: list[str] = (
-            ["+ /**", f"- {COMPARE_ROOT}/**"]
-            + [f"- {self._depth_path(index)}" for index in range(len(self.cam_names))]
-            + [f"- {self._video_path(index)}" for index in range(len(self.cam_names))]
-        )
-        follow_eye = rrb.EyeControls3D(
-            kind=rrb.Eye3DKind.Orbital,
-            position=(0.0, -1.2, -2.5),
-            look_target=(0.0, 0.0, 1.5),
-            eye_up=(0.0, -1.0, 0.0),
-            spin_speed=0.0,
-        )
-        return rrb.Blueprint(
-            rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.Spatial3DView(
-                        origin="/",
-                        name="3D map",
-                        contents=contents_3d,
-                        eye_controls=eye_controls,
-                    ),
-                    rrb.Spatial3DView(
-                        name="Follow",
-                        origin="world/rig",
-                        contents=contents_3d + ["- world/keyframes/**"],
-                        eye_controls=follow_eye,
-                    ),
-                    row_shares=[3.0, 2.0],
-                ),
-                rrb.Vertical(
-                    rrb.Horizontal(*compare_views, name="render vs GT"),
-                    rrb.Horizontal(*image_views),
-                    rrb.Horizontal(*depth_views),
-                    row_shares=[2.0, 1.0, 1.0],
-                ),
-                column_shares=[3, 2],
+    def _dashboard_spec(self) -> DashboardSpec:
+        """Return Waymo entity paths and RDF follow-view controls."""
+        camera_indices: range = range(len(self.cam_names))
+        return DashboardSpec(
+            image_origins=tuple(self._pinhole_path(index) for index in camera_indices),
+            image_contents=("+ $origin/image",),
+            depth_origins=tuple(self._depth_path(index) for index in camera_indices),
+            render_origins=tuple(self._render_path(index) for index in camera_indices),
+            ground_truth_origins=tuple(
+                self._ground_truth_path(index) for index in camera_indices
             ),
-            collapse_panels=True,
+            excluded_3d_paths=(
+                f"{COMPARE_ROOT}/**",
+                *(self._depth_path(index) for index in camera_indices),
+                *(self._video_path(index) for index in camera_indices),
+            ),
+            follow_origin="world/rig",
+            follow_exclusions=("world/keyframes/**",),
+            follow_eye=rrb.EyeControls3D(
+                kind=rrb.Eye3DKind.Orbital,
+                position=(0.0, -1.2, -2.5),
+                look_target=(0.0, 0.0, 1.5),
+                eye_up=(0.0, -1.0, 0.0),
+                spin_speed=0.0,
+            ),
         )
 
     def log_frame(

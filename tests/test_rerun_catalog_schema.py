@@ -77,6 +77,7 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
         map_scale=1.0,
         save_path=str(rrd_path),
     )
+    logger.send_blueprint()
     streams: list[SimpleNamespace] = [
         SimpleNamespace(
             times_ns=np.array([1_000_000_000], dtype=np.int64),
@@ -87,17 +88,19 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     ]
     logger.relay_video_streams(streams)
     world_from_rig_44: Float64[np.ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    frame = CatalogKeyframe(
-        timestamp_ns=1_000_000_000,
-        world_from_rig=world_from_rig_44,
-        images_rgb=torch.zeros((4, 3, 8, 8), dtype=torch.uint8),
-    )
-    logger.log_catalog_keyframe(
-        0,
-        frame,
-        depth_metres_nhw=torch.ones((4, 8, 8), dtype=torch.float32),
-        normals_n3hw=torch.ones((4, 3, 8, 8), dtype=torch.float32),
-    )
+    for frame_index in range(3):
+        world_from_rig_44[0, 3] = float(frame_index)
+        frame = CatalogKeyframe(
+            timestamp_ns=1_000_000_000 + frame_index,
+            world_from_rig=world_from_rig_44.copy(),
+            images_rgb=torch.zeros((4, 3, 8, 8), dtype=torch.uint8),
+        )
+        logger.log_catalog_keyframe(
+            frame_index,
+            frame,
+            depth_metres_nhw=torch.ones((4, 8, 8), dtype=torch.float32),
+            normals_n3hw=torch.ones((4, 3, 8, 8), dtype=torch.float32),
+        )
     logger.log_render_comparison(
         0,
         rendered_3hw=torch.zeros((3, 8, 8), dtype=torch.float32),
@@ -122,7 +125,6 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
                 f"{camera_path}/pinhole",
                 f"{camera_path}/pinhole/video",
                 f"{camera_path}/rectified",
-                f"{camera_path}/rectified/pinhole",
                 f"{camera_path}/rectified/image",
                 f"{camera_path}/rectified/depth",
             }
@@ -132,6 +134,11 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     assert not any("virtual_pinhole" in path for path in entity_paths)
     assert not any(path.startswith("/render_vs_gt/") for path in entity_paths)
     assert not any(path.endswith("/rectified/gt") for path in entity_paths)
+    for camera_id in (0, 1, 4, 5):
+        rectified_path: str = f"/world/rig_00/cam_{camera_id:02d}/rectified"
+        depth_path: str = f"{rectified_path}/depth"
+        assert rectified_path in entity_paths
+        assert depth_path.startswith(f"{rectified_path}/")
 
     root_chunk: rrx.Chunk = next(chunk for chunk in chunks if _entity_path(chunk) == "/")
     assert root_chunk.to_record_batch()["ViewCoordinates:xyz"].to_pylist() == [[[3, 5, 1]]]
@@ -174,6 +181,23 @@ def test_catalog_recording_uses_exoego_v2_paths_and_transform_relations(tmp_path
     rectified_transform: dict[str, list[object]] = rectified_transform_chunk.to_record_batch().to_pydict()
     assert rectified_transform["Transform3D:relation"] == [[rr.TransformRelation.ChildFromParent.value]]
     assert rectified_transform["Transform3D:translation"] == [[[0.0, 0.0, 0.0]]]
+    rectified_columns: set[str] = {
+        column
+        for chunk in chunks
+        if _entity_path(chunk) == "/world/rig_00/cam_00/rectified"
+        for column in chunk.to_record_batch().schema.names
+    }
+    assert "Pinhole:image_from_camera" in rectified_columns
+
+    trajectory_chunk: rrx.Chunk = next(
+        chunk for chunk in chunks if _entity_path(chunk) == "/world/trajectory"
+    )
+    trajectory_rows: list[object] = trajectory_chunk.to_record_batch().to_pydict()[
+        "LineStrips3D:strips"
+    ]
+    assert trajectory_rows[-1] == [
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+    ]
 
     pinhole_columns: set[str] = {
         column

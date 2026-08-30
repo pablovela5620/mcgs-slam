@@ -1,5 +1,6 @@
 """Schema-neutral Rerun logging shared by the Waymo and catalog paths."""
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,6 +15,30 @@ from gaussian.utils.sh_utils import SH2RGB
 
 if TYPE_CHECKING:
     from gaussian.scene.gaussian_model import GaussianModel
+
+
+@dataclass(slots=True, frozen=True)
+class DashboardSpec:
+    """Schema-specific paths and view controls for the shared dashboard."""
+
+    image_origins: tuple[str, ...]
+    """One image-view origin per camera."""
+    image_contents: tuple[str, ...] | None
+    """Optional common image-view contents query."""
+    depth_origins: tuple[str, ...]
+    """One depth-view origin per camera."""
+    render_origins: tuple[str, ...]
+    """One rendered-image origin per camera."""
+    ground_truth_origins: tuple[str, ...]
+    """One comparison ground-truth origin per camera."""
+    excluded_3d_paths: tuple[str, ...]
+    """Entity paths excluded from both 3D views."""
+    follow_origin: str
+    """Entity origin followed by the secondary 3D view."""
+    follow_exclusions: tuple[str, ...]
+    """Extra entity paths excluded only from the follow view."""
+    follow_eye: rrb.EyeControls3D
+    """Fixed camera controls for the follow view."""
 
 
 def _percentile_bbox(
@@ -82,15 +107,99 @@ class RerunLogger:
                 "(--rrd / --rerun-spawn)"
             )
         rr.set_sinks(*sinks)
-        rr.send_blueprint(self._blueprint())
         rr.log("/", self.world_coordinates, static=True)
+
+    def _dashboard_spec(self) -> DashboardSpec:
+        """Return schema-specific paths and controls for the shared dashboard."""
+        raise NotImplementedError
 
     def _blueprint(
         self,
         eye_controls: rrb.EyeControls3D | None = None,
     ) -> rrb.Blueprint:
-        """Return the concrete logger's schema-specific blueprint."""
-        raise NotImplementedError
+        """Build the common image, depth, comparison, and 3D dashboard."""
+        spec: DashboardSpec = self._dashboard_spec()
+        camera_count: int = len(self.cam_names)
+        path_groups: tuple[tuple[str, ...], ...] = (
+            spec.image_origins,
+            spec.depth_origins,
+            spec.render_origins,
+            spec.ground_truth_origins,
+        )
+        if any(len(paths) != camera_count for paths in path_groups):
+            raise ValueError("dashboard paths must match the logged camera count")
+
+        image_views: list[rrb.Spatial2DView] = [
+            rrb.Spatial2DView(
+                origin=spec.image_origins[index],
+                name=self.cam_names[index],
+                contents=spec.image_contents,
+            )
+            for index in range(camera_count)
+        ]
+        depth_views: list[rrb.Spatial2DView] = [
+            rrb.Spatial2DView(
+                origin=spec.depth_origins[index],
+                name=f"{self.cam_names[index]} depth",
+            )
+            for index in range(camera_count)
+        ]
+        comparison_views: list[object] = [
+            rrb.Vertical(
+                rrb.Spatial2DView(
+                    origin=spec.render_origins[index],
+                    name=f"{self.cam_names[index]} render",
+                ),
+                rrb.Spatial2DView(
+                    origin=spec.ground_truth_origins[index],
+                    name=f"{self.cam_names[index]} GT",
+                ),
+                name=self.cam_names[index],
+            )
+            for index in range(camera_count)
+        ]
+        contents_3d: list[str] = [
+            "+ /**",
+            *(f"- {path}" for path in spec.excluded_3d_paths),
+        ]
+        follow_contents_3d: list[str] = [
+            *contents_3d,
+            *(f"- {path}" for path in spec.follow_exclusions),
+        ]
+        return rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Vertical(
+                    rrb.Spatial3DView(
+                        origin="/",
+                        name="3D map",
+                        contents=contents_3d,
+                        eye_controls=eye_controls,
+                    ),
+                    rrb.Spatial3DView(
+                        name="Follow",
+                        origin=spec.follow_origin,
+                        contents=follow_contents_3d,
+                        eye_controls=spec.follow_eye,
+                    ),
+                    row_shares=[3.0, 2.0],
+                ),
+                rrb.Vertical(
+                    rrb.Horizontal(*comparison_views, name="render vs GT"),
+                    rrb.Horizontal(*image_views),
+                    rrb.Horizontal(*depth_views),
+                    row_shares=[2.0, 1.0, 1.0],
+                ),
+                column_shares=[3, 2],
+            ),
+            collapse_panels=True,
+        )
+
+    def send_blueprint(
+        self,
+        eye_controls: rrb.EyeControls3D | None = None,
+    ) -> None:
+        """Build and send the dashboard after concrete logger initialization."""
+        rr.send_blueprint(self._blueprint(eye_controls=eye_controls))
 
     def _render_path(self, cam_idx: int) -> str:
         """Return the concrete logger's render entity path."""
@@ -267,7 +376,7 @@ class RerunLogger:
             look_target=center_3.tolist(),
             eye_up=up_3.tolist(),
         )
-        rr.send_blueprint(self._blueprint(eye_controls=eye_controls))
+        self.send_blueprint(eye_controls=eye_controls)
 
     def set_refine_iter(self, iteration: int) -> None:
         """Advance the color-refinement timeline."""
