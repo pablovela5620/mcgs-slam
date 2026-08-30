@@ -145,7 +145,6 @@ dist
 *.egg-info
 *.vscode/
 *.ckpt
-tests
 checkpoints
 datasets
 output
@@ -162,3 +161,7 @@ outputs
 .pixi/
 .pixi-cache/
 *.rrd
+
+# local tooling
+.playwright-cli/
+__pycache__/

@@ -15,7 +15,7 @@ from geom.ba import JDSA
 global_iter = 0
 
 class DepthVideo:
-    def __init__(self, args, image_size=[480, 640], buffer=1024, stereo=False, device="cuda:0"):
+    def __init__(self, args, image_size=[480, 640], buffer=1024, device="cuda:0"):
 
         self.vis = args.vis
         buffer += 15
@@ -23,16 +23,16 @@ class DepthVideo:
         
         self.use_jdsa = args.jdsa
 
-        self.stereo = stereo
-        c = 1 if not self.stereo else 2
-        self.multi = args.multi if args.multi > 2 else False
-        c = self.multi if self.multi else c  # front left/right, right, left
+        self.multi = args.multi
+        c = self.multi
 
         # current keyframe count
         self.counter = Value('i', 0)
         self.ht = ht = image_size[0]
         self.wd = wd = image_size[1]
-        self.base = torch.as_tensor(args.base, dtype=torch.float, device="cuda")
+        # The CUDA BA ABI still accepts a legacy rig transform argument. No
+        # self-edge reaches it, so identity is the neutral compatibility value.
+        self.neutral_transform = SE3.Identity(1, device="cuda", dtype=torch.float).data.squeeze(0)
         self.kf_stamps = {}
 
         ### state attributes ###
@@ -42,14 +42,12 @@ class DepthVideo:
         self.poses = torch.zeros(buffer, 7, device="cuda", dtype=torch.float).share_memory_()
         self.disps = torch.ones(buffer, ht//8, wd//8, device="cuda", dtype=torch.float).share_memory_()
         self.disps_sens = torch.zeros(buffer, ht//8, wd//8, device="cuda", dtype=torch.float).share_memory_()
-        self.disps_list = [self.disps]
         self.intrinsics = torch.zeros(buffer, c, 8, device="cuda", dtype=torch.float).share_memory_()
         
         # TODO
         self.images_up = torch.zeros(buffer, 3, ht, wd, device="cpu", dtype=torch.uint8).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device="cpu", dtype=torch.float).share_memory_()
         self.normals = torch.zeros(buffer, 3, ht, wd, device="cpu", dtype=torch.float).share_memory_()
-        self.disps_prior_up = torch.zeros(buffer, ht, wd, device="cpu", dtype=torch.float).share_memory_()
         self.dscales = torch.ones(buffer, 2, 2, device='cuda', dtype=torch.float).share_memory_()
         
         self.ii = torch.zeros(int(1e4), 1, dtype=torch.long, device='cuda').share_memory_()
@@ -58,23 +56,20 @@ class DepthVideo:
 
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, c, 128, ht//8, wd//8, dtype=torch.half, device="cuda").share_memory_()
-        self.nets = torch.zeros(buffer, c-1, 128, ht//8, wd//8, dtype=torch.half, device="cuda").share_memory_()
-        self.inps = torch.zeros(buffer, c-1, 128, ht//8, wd//8, dtype=torch.half, device="cuda").share_memory_()
+        self.nets = torch.zeros(buffer, c, 128, ht//8, wd//8, dtype=torch.half, device="cuda").share_memory_()
+        self.inps = torch.zeros(buffer, c, 128, ht//8, wd//8, dtype=torch.half, device="cuda").share_memory_()
 
         ### Mutil Cameras ###
-        self.T_ci_c0 = [SE3(torch.as_tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device="cuda")[None,None])]
-        if self.multi:
-            self.images_list = [self.images] + [torch.zeros(buffer, 3, ht//8, wd//8, device="cpu", dtype=torch.uint8) for _ in range(self.multi-2)]
-            self.disps_list = [self.disps] + [torch.ones(buffer, ht//8, wd//8, device="cuda", dtype=torch.float).share_memory_() for _ in range(self.multi-2)]
-            self.T_ci_c0 = [SE3(T[None,None]) for T in args.T_cami_cam0]
-            
-            # TODO
-            self.disps_up_list = [self.disps_up] + [torch.zeros(buffer, ht, wd, device="cpu", dtype=torch.float).share_memory_() for _ in range(self.multi-2)]
-            self.images_up_list = [self.images_up] + [torch.zeros(buffer, 3, ht, wd, device="cpu", dtype=torch.uint8).share_memory_() for _ in range(self.multi-2)]
-            self.normals_list = [self.normals] + [torch.zeros(buffer, 3, ht, wd, device="cpu", dtype=torch.float).share_memory_() for _ in range(self.multi-2)]
-            self.disps_prior_up_list = [self.disps_prior_up] + [torch.zeros(buffer, ht, wd, device="cpu", dtype=torch.float).share_memory_() for _ in range(self.multi-2)]
-            self.disps_sens_list = [self.disps_sens] + [torch.zeros(buffer, ht//8, wd//8, device="cuda", dtype=torch.float).share_memory_() for _ in range(self.multi-2)]
-            self.dscales_list = [self.dscales] + [torch.ones(buffer, 2, 2, device='cuda', dtype=torch.float).share_memory_() for _ in range(self.multi-2)]
+        self.images_list = [self.images] + [torch.zeros(buffer, 3, ht//8, wd//8, device="cpu", dtype=torch.uint8) for _ in range(1, self.multi)]
+        self.disps_list = [self.disps] + [torch.ones(buffer, ht//8, wd//8, device="cuda", dtype=torch.float).share_memory_() for _ in range(1, self.multi)]
+        self.T_ci_c0 = [SE3(T.to(device="cuda")[None, None]) for T in args.T_cami_cam0]
+
+        # TODO
+        self.disps_up_list = [self.disps_up] + [torch.zeros(buffer, ht, wd, device="cpu", dtype=torch.float).share_memory_() for _ in range(1, self.multi)]
+        self.images_up_list = [self.images_up] + [torch.zeros(buffer, 3, ht, wd, device="cpu", dtype=torch.uint8).share_memory_() for _ in range(1, self.multi)]
+        self.normals_list = [self.normals] + [torch.zeros(buffer, 3, ht, wd, device="cpu", dtype=torch.float).share_memory_() for _ in range(1, self.multi)]
+        self.disps_sens_list = [self.disps_sens] + [torch.zeros(buffer, ht//8, wd//8, device="cuda", dtype=torch.float).share_memory_() for _ in range(1, self.multi)]
+        self.dscales_list = [self.dscales] + [torch.ones(buffer, 2, 2, device='cuda', dtype=torch.float).share_memory_() for _ in range(1, self.multi)]
             
         # initialize poses to identity transformation
         self.poses[:] = torch.as_tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device="cuda")
@@ -86,6 +81,14 @@ class DepthVideo:
     def total_counter(self):
         return self.counter.value + self.globuf.offset.value
 
+    def K(self, cam: int) -> torch.Tensor:
+        """Return all frame intrinsics for one camera with a batch dimension."""
+        return self.intrinsics[None, :, cam].contiguous()
+
+    def K_row(self, cam: int) -> torch.Tensor:
+        """Return one camera's static intrinsic row."""
+        return self.intrinsics[0, cam]
+
     def release_buffer(self, window):
         with self.get_lock():
             i = self.counter.value - window
@@ -95,30 +98,18 @@ class DepthVideo:
             for ii in range(window+1):
                 self.tstamp[ii] = self.tstamp[i+ii]
                 self.poses[ii] = self.poses[i+ii]
-                self.images[ii] = self.images[i+ii]
-                self.disps[ii] = self.disps[i+ii]
                 self.intrinsics[ii] = self.intrinsics[i+ii]
                 self.fmaps[ii] = self.fmaps[i+ii]
                 self.nets[ii] = self.nets[i+ii]
                 self.inps[ii] = self.inps[i+ii]
-                for ic in range(1, self.multi-1):
+                for ic in range(self.multi):
                     self.images_list[ic][ii] = self.images_list[ic][i+ii]
                     self.disps_list[ic][ii] = self.disps_list[ic][i+ii]
-                    
-                    # TODO release
                     self.disps_up_list[ic][ii] = self.disps_up_list[ic][i+ii]
                     self.normals_list[ic][ii] = self.normals_list[ic][i+ii]   
                     self.images_up_list[ic][ii] = self.images_up_list[ic][i+ii]
-                    self.disps_prior_up_list[ic][ii] = self.disps_prior_up_list[ic][i+ii]
                     self.disps_sens_list[ic][ii] = self.disps_sens_list[ic][i+ii]
                     self.dscales_list[ic][ii] = self.dscales_list[ic][i+ii]
-                    
-                self.images_up[ii] = self.images_up[i+ii]
-                self.disps_up[ii] = self.disps_up[i+ii]
-                self.normals[ii] = self.normals[i+ii]
-                self.disps_prior_up[ii] = self.disps_prior_up[i+ii]
-                self.disps_sens[ii] = self.disps_sens[i+ii]
-                self.dscales[ii] = self.dscales[i+ii]
                 
                 if ii < window:
                     self.kf_stamps[ii] = self.kf_stamps[i+ii]
@@ -127,27 +118,15 @@ class DepthVideo:
         """ drop edges from factor graph """
         with self.get_lock():
             self.tstamp[ix] = self.tstamp[ix+1]
-            self.images[ix] = self.images[ix+1]
             self.poses[ix] = self.poses[ix+1]
-            self.disps[ix] = self.disps[ix+1]
-            for ic in range(1, self.multi-1):
+            for ic in range(self.multi):
                 self.images_list[ic][ix] = self.images_list[ic][ix+1]
                 self.disps_list[ic][ix] = self.disps_list[ic][ix+1]
-                
-                # TODO
                 self.disps_up_list[ic][ix] = self.disps_up_list[ic][ix+1]
                 self.normals_list[ic][ix] = self.normals_list[ic][ix+1]
                 self.images_up_list[ic][ix] = self.images_up_list[ic][ix+1]
-                self.disps_prior_up_list[ic][ix] = self.disps_prior_up_list[ic][ix+1]
                 self.disps_sens_list[ic][ix] = self.disps_sens_list[ic][ix+1]
                 self.dscales_list[ic][ix] = self.dscales_list[ic][ix+1]
-
-            self.images_up[ix] = self.images_up[ix+1]
-            self.disps_up[ix] = self.disps_up[ix+1]
-            self.normals[ix] = self.normals[ix+1]
-            self.disps_prior_up[ix] = self.disps_prior_up[ix+1]
-            self.disps_sens[ix] = self.disps_sens[ix+1]
-            self.dscales[ix] = self.dscales[ix+1]
             
             self.intrinsics[ix] = self.intrinsics[ix+1]
 
@@ -171,9 +150,7 @@ class DepthVideo:
         # self.dirty[index] = True
         self.tstamp[index] = item[0]
         if item[2] is not None:
-            self.images[index] = item[2][0][:,3::8,3::8].cpu()
-            self.images_up[index] = item[2][0].cpu()
-            for ic in range(1, self.multi-1):
+            for ic in range(self.multi):
                 self.images_list[ic][index] = item[2][ic][:,3::8,3::8].cpu()
                 self.images_up_list[ic][index] = item[2][ic].cpu()
 
@@ -184,19 +161,12 @@ class DepthVideo:
             self.disps[index] = item[4]
             
         if item[5] is not None:
-            depth = item[5][0]
-            self.disps_prior_up[index] = torch.where(depth>0, 1.0/depth, 0).cpu()
-            depth = item[5][0][3::8,3::8]
-            self.disps_sens[index] = torch.where(depth>0, 1.0/depth, 0).cuda()
-            for ic in range(1, self.multi-1):
-                depth = item[5][ic]
-                self.disps_prior_up_list[ic][index] = torch.where(depth>0, 1.0/depth, 0).cpu()
+            for ic in range(self.multi):
                 depth = item[5][ic][3::8,3::8]
                 self.disps_sens_list[ic][index] = torch.where(depth>0, 1.0/depth, 0).cuda()
         
         if item[6] is not None:
-            self.normals[index] = item[6][0]
-            for ic in range(1, self.multi-1):
+            for ic in range(self.multi):
                 self.normals_list[ic][index] = item[6][ic]
 
         if item[7] is not None:
@@ -256,38 +226,25 @@ class DepthVideo:
 
         return ii, jj
 
-    def upsample(self, ix, mask, index):
-        """ upsample disparity """
-
-        disps_up = cvx_upsample(self.disps_list[index][ix].unsqueeze(-1), mask)
-        self.disps_up[ix] = disps_up.squeeze().cpu()
-    
     def upsample_list(self, ix, mask, index):
         """ upsample disparity """
         
         disps_up = cvx_upsample(self.disps_list[index][ix].unsqueeze(-1), mask)
         self.disps_up_list[index][ix] = disps_up.squeeze().cpu()
 
-    def normalize(self):
-        """ normalize depth and poses """
-
-        with self.get_lock():
-            s = self.disps[:self.counter.value].mean()
-            self.disps[:self.counter.value] /= s
-            self.poses[:self.counter.value, :3] *= s
-            self.dirty[:self.counter.value] = True
-
     def reproject(self, ii, jj, index=0):
         """ project points from ii -> jj """
         ii, jj = DepthVideo.format_indicies(ii, jj)
         Gs = SE3(self.poses[None])  # T_c0_w
 
-        if index > 0:
-            coords, valid_mask = \
-                pops.projective_transform(Gs, self.disps_list[index][None], self.intrinsics[None,:,[index+1]], self.base, ii, jj, Tcb=self.T_ci_c0[index])
-        else:
-            coords, valid_mask = \
-                pops.projective_transform(Gs, self.disps[None], self.intrinsics[None], self.base, ii, jj)
+        coords, valid_mask = pops.projective_transform(
+            Gs,
+            self.disps_list[index][None],
+            self.K(index),
+            ii,
+            jj,
+            Tcb=self.T_ci_c0[index],
+        )
 
         return coords, valid_mask
 
@@ -302,8 +259,8 @@ class DepthVideo:
 
         s = 2048
         for i in range(0, ii.shape[0], s):
-            flow1, val1 = pops.induced_flow(Gs, self.disps[None], self.intrinsics[None], self.base, ii[i:i+s], jj[i:i+s])
-            flow2, val2 = pops.induced_flow(Gs, self.disps[None], self.intrinsics[None], self.base, jj[i:i+s], ii[i:i+s])
+            flow1, val1 = pops.induced_flow(Gs, self.disps[None], self.K(0), ii[i:i+s], jj[i:i+s])
+            flow2, val2 = pops.induced_flow(Gs, self.disps[None], self.K(0), jj[i:i+s], ii[i:i+s])
 
             flow = torch.stack([flow1, flow2], dim=2)
             val = torch.stack([val1, val2], dim=2)
@@ -335,16 +292,16 @@ class DepthVideo:
             poses = self.poses[:self.counter.value].clone()
 
             d1 = droid_backends.frame_distance(
-                poses, self.disps, self.intrinsics[0,0], ii, jj, beta)
+                poses, self.disps, self.K_row(0), ii, jj, beta)
 
             d2 = droid_backends.frame_distance(
-                poses, self.disps, self.intrinsics[0,0], jj, ii, beta)
+                poses, self.disps, self.K_row(0), jj, ii, beta)
 
             d = .5 * (d1 + d2)
 
         else:
             d = droid_backends.frame_distance(
-                self.poses, self.disps, self.intrinsics[0,0], ii, jj, beta)
+                self.poses, self.disps, self.K_row(0), ii, jj, beta)
 
         if return_matrix:
             return d.reshape(N, N)
@@ -364,7 +321,7 @@ class DepthVideo:
             poses = SE3(self.poses[:t1][None])
             disps = self.disps[:t1][None]
             for _ in range(itrs):
-                poses, disps = BA(target, weight, eta, poses, disps, self.intrinsics[None], self.base, ii, jj, fixedp=t0)
+                poses, disps = BA(target, weight, eta, poses, disps, self.K(0), ii, jj, fixedp=t0)
             self.poses[:t1] = poses.data[0]
             self.disps[:t1] = disps[0]
             self.disps.clamp_(min=0.001)
@@ -379,7 +336,8 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             for _ in range(itrs):
-                droid_backends.ba(self.poses, self.disps, self.intrinsics[0,:2], self.base, self.disps_sens,
+                # CUDA ba/global_pose_ba still read intrinsics[1] on their dead ix==jx path; keep two rows until the kernels are cleaned up.
+                droid_backends.ba(self.poses, self.disps, self.intrinsics[0, [0, 0]], self.neutral_transform, self.disps_sens,
                                   target, weight, eta, ii, jj, t0, t1, 1, lm, ep)
             
             if self.use_jdsa and use_scaling:
@@ -387,7 +345,7 @@ class DepthVideo:
                 poses = SE3(self.poses[:t1][None])
                 disps = self.disps[:t1][None]
                 dscales = self.dscales[:t1]
-                disps, dscales, _ = JDSA(target, weight, eta, poses, disps, self.intrinsics[None, :, [0], :].contiguous().squeeze(2),
+                disps, dscales, _ = JDSA(target, weight, eta, poses, disps, self.K(0),
                                          self.disps_sens, dscales, ii, jj, 0.001)
                 self.disps[:t1] = disps[0]
                 self.dscales[:t1] = dscales
@@ -410,27 +368,23 @@ class DepthVideo:
                 for ii, jj, T_ci_c0 in zip(iis, jjs, self.T_ci_c0):
                     Gicj = T_ci_c0 * poses_cw[:,jj] * poses_cw[:,ii].inv()
                     Gij = Gicj * T_ci_c0.inv()
-                    Gij.data[:, ii==jj] = self.base
                     Gijs.append(Gij.data[0])
                     Gicjs.append(Gicj.data[0])
 
-                Ks = [self.intrinsics[0,:2]] + [self.intrinsics[0,[ic]] for ic in range(2, self.multi)]
+                Ks = [self.K_row(ic)[None] for ic in range(self.multi)]
                 T_ci_c0 = [T.data[0,0] for T in self.T_ci_c0]
                 droid_backends.multi_cam_ba(self.poses, Ks, self.disps_list, self.disps_sens_list, Gijs, Gicjs, T_ci_c0,
                                             targets, weights, etas, iis, jjs, t0, t1, 6, lm, ep)
             
             if self.use_jdsa and use_scaling:
                 print("=====================JDSA=====================")      
-                for i, disps in enumerate(self.disps_list):
+                for i in range(self.multi):
                     poses = self.T_ci_c0[i] * SE3(self.poses[:t1][None])
                     disps = self.disps_list[i][:t1][None]
                     dscales = self.dscales_list[i][:t1]
                     
-                    idx = i if i == 0 else i + 1
-                    intrinsics_i = self.intrinsics[None, :, [idx], :].contiguous().squeeze(2)
-                    
-                    disps, dscales, _ = JDSA(targets[i], weights[i], etas[i], poses, disps, intrinsics_i, 
-                                                self.disps_sens_list[i], dscales, ii, jj, 0.001)
+                    disps, dscales, _ = JDSA(targets[i], weights[i], etas[i], poses, disps, self.K(i),
+                                                self.disps_sens_list[i], dscales, iis[i], jjs[i], 0.001)
                         
                     self.disps_list[i][:t1] = disps[0]
                     self.dscales_list[i][:t1] = dscales
@@ -451,7 +405,7 @@ class DepthVideo:
             poses_cw = SE3(self.poses[:t1][None])
             for _ in range(itrs):
                 # reprojection chi2 error
-                coords, valid = pops.projective_transform(poses_cw, self.disps[None], self.intrinsics[None], self.base, ii, jj)
+                coords, valid = pops.projective_transform(poses_cw, self.disps[None], self.K(0), ii, jj)
                 r = (target[None] - coords.permute(0,1,4,2,3).contiguous())
                 r = r.view(1, ii.shape[0], -1, 1)
                 rw = .001 * (valid.permute(0,1,4,2,3) * weight[None]).view(1, ii.shape[0], -1, 1)
@@ -462,13 +416,12 @@ class DepthVideo:
                 mask = (iip != jjp)
                 iip, jjp = iip[mask], jjp[mask]
                 rel_poses = self.globuf.rel_poses[:self.globuf.rel_N][mask.cpu()].cuda()[None]
-                if self.multi:
-                    rel_cam_index = self.globuf.rel_cam_index[:self.globuf.rel_N][mask.cpu()]
-                    for index in rel_cam_index.unique():
-                        if index == 0:
-                            continue
-                        cami = rel_cam_index.cuda() == index
-                        rel_poses[:,cami] = (self.T_ci_c0[index].inv() * SE3(rel_poses[:,cami]) * self.T_ci_c0[index]).data
+                rel_cam_index = self.globuf.rel_cam_index[:self.globuf.rel_N][mask.cpu()]
+                for index in rel_cam_index.unique():
+                    if index == 0:
+                        continue
+                    cami = rel_cam_index.cuda() == index
+                    rel_poses[:,cami] = (self.T_ci_c0[index].inv() * SE3(rel_poses[:,cami]) * self.T_ci_c0[index]).data
                 infos = 1 / self.globuf.rel_covs[:self.globuf.rel_N][mask.cpu()].cuda()
                 infos = infos.unsqueeze(2).expand(*infos.size(), 6) * torch.eye(6, device='cuda')[None]
                 infos[torch.isnan(infos) | torch.isinf(infos)] = 0.
@@ -484,8 +437,8 @@ class DepthVideo:
 
                 Gibj = self.T_ci_c0[0] * poses_cw[:,jj] * poses_cw[:,ii].inv()
                 Gij = Gibj * self.T_ci_c0[0].inv()
-                Gij.data[:, ii==jj] = self.base
-                droid_backends.global_pose_ba(poses_cw.data[0], self.disps, self.disps_sens, self.intrinsics[0,:2],
+                # CUDA ba/global_pose_ba still read intrinsics[1] on their dead ix==jx path; keep two rows until the kernels are cleaned up.
+                droid_backends.global_pose_ba(poses_cw.data[0], self.disps, self.disps_sens, self.intrinsics[0, [0, 0]],
                                               Gij.data[0], Gibj.data[0], self.T_ci_c0[0].data[0,0],
                                               Hsp, vsp, target, weight, eta, ii, jj, iip, jjp, t0, t1, 1, lm, ep)
 

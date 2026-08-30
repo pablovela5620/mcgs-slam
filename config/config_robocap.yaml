@@ -1,0 +1,43 @@
+Dataset:
+  # 640x360 x four cameras already seeds dense coverage; these rates keep the
+  # initial cloud and each later keyframe bounded while preserving room edges.
+  pcd_downsample: 64
+  pcd_downsample_init: 32
+  adaptive_pointsize: true
+  point_size: 0.03
+  adaptive_pointsize_max: 0.03
+  # The mapped library room is about 5x10 m. MoGe values beyond 15 m are mostly
+  # through doors/windows and create oversized floaters.
+  depth_trunc: 15.0
+  cameras_extent: 12.0
+  znear: 0.05
+  zfar: 30.0
+
+Training:
+  init_itr_num: 1050
+  init_gaussian_update: 100
+  init_gaussian_reset: 500
+  init_gaussian_th: 0.005
+  init_gaussian_extent: 1.5
+  gaussian_update_every: 150
+  gaussian_update_offset: 50
+  gaussian_th: 0.7
+  gaussian_extent: 1.0
+  size_threshold: 20
+  rgb_boundary_threshold: 0.01
+  lambda_dnormal: 0.1
+  compensate_exposure: false
+
+opt_params:
+  # Basalt poses are immutable truth for this entry point.
+  pose_lr: 0.0
+  position_lr_init: 0.00016
+  position_lr_final: 0.0000016
+  position_lr_max_steps: 2000
+  feature_lr: 0.0025
+  opacity_lr: 0.05
+  scaling_lr: 0.001
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  densify_grad_threshold: 0.0002

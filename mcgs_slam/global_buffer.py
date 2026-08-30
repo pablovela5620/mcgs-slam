@@ -7,23 +7,21 @@ from lietorch import SE3
 class GlobalBuffer:
     def __init__(self, video, args, c):
         self.video = video
-        self.multi = args.multi if args.multi > 2 else False
+        self.multi = args.multi
         self.vis = args.vis
         ht, wd = args.ht, args.wd
         self.offset = Value('i', 0)
 
         self.kf_stamps_all = {}
         self.poses_all = torch.zeros(0, 7, device="cpu", dtype=torch.float)
-        self.images_all = torch.zeros(0, 3, ht//8, wd//8, device="cpu", dtype=torch.uint8)
-        self.disps_all = torch.zeros(0, ht//8, wd//8, device="cpu", dtype=torch.float)
         self.fmaps_all = torch.zeros(0, c, 128, ht//8, wd//8, dtype=torch.half, device="cpu")
-        self.nets_all = torch.zeros(0, c-1, 128, ht//8, wd//8, dtype=torch.half, device="cpu")
-        self.inps_all = torch.zeros(0, c-1, 128, ht//8, wd//8, dtype=torch.half, device="cpu")
+        self.nets_all = torch.zeros(0, c, 128, ht//8, wd//8, dtype=torch.half, device="cpu")
+        self.inps_all = torch.zeros(0, c, 128, ht//8, wd//8, dtype=torch.half, device="cpu")
         if self.vis:
             self.disps_up_all = torch.zeros(0, ht, wd, device="cpu", dtype=torch.float)
-        if self.multi:
-            self.images_all_list = [self.images_all] + [torch.zeros(0, 3, ht//8, wd//8, device="cpu", dtype=torch.uint8) for _ in range(self.multi-2)]
-            self.disps_all_list = [self.disps_all] + [torch.zeros(0, ht//8, wd//8, device="cpu", dtype=torch.float) for _ in range(self.multi-2)]
+        # one entry per camera; camera 0 is images_all_list[0] (see the properties below)
+        self.images_all_list = [torch.zeros(0, 3, ht//8, wd//8, device="cpu", dtype=torch.uint8) for _ in range(self.multi)]
+        self.disps_all_list = [torch.zeros(0, ht//8, wd//8, device="cpu", dtype=torch.float) for _ in range(self.multi)]
 
         # pose graph buffer
         self.rel_N = 0
@@ -37,36 +35,40 @@ class GlobalBuffer:
         self.rel_cam_index = torch.zeros(int(max_rel), device="cpu", dtype=torch.uint8)
         self.output = args.output
 
+    @property
+    def images_all(self):
+        """Camera-0 keyframe images (alias of images_all_list[0])."""
+        return self.images_all_list[0]
+
+    @property
+    def disps_all(self):
+        """Camera-0 keyframe disparities (alias of disps_all_list[0])."""
+        return self.disps_all_list[0]
+
     def fill_global_data(self, N=None):
         N = self.video.counter.value if N is None else N
 
         print("- - revert pose data", self.offset.value, self.video.counter.value, N)
         self.poses_all = torch.cat((self.poses_all, torch.zeros(N, 7, dtype=torch.float)), dim=0)
-        self.images_all = torch.cat((self.images_all, torch.zeros((N,)+self.images_all.shape[1:], dtype=torch.uint8)), dim=0)
-        self.disps_all = torch.cat((self.disps_all, torch.zeros((N,)+self.disps_all.shape[1:], dtype=torch.float)), dim=0)
         self.fmaps_all = torch.cat((self.fmaps_all, torch.zeros((N,)+self.fmaps_all.shape[1:], dtype=torch.half)), dim=0)
         self.nets_all = torch.cat((self.nets_all, torch.zeros((N,)+self.nets_all.shape[1:], dtype=torch.half)), dim=0)
         self.inps_all = torch.cat((self.inps_all, torch.zeros((N,)+self.inps_all.shape[1:], dtype=torch.half)), dim=0)
         if self.vis:
             self.disps_up_all = torch.cat((self.disps_up_all, torch.zeros((N,)+self.disps_up_all.shape[1:], dtype=torch.float)), dim=0)
-        if self.multi:
-            for ic in range(1, self.multi-1):
-                self.images_all_list[ic] = torch.cat((self.images_all_list[ic], torch.zeros((N,)+self.images_all.shape[1:], dtype=torch.uint8)), dim=0)
-                self.disps_all_list[ic] = torch.cat((self.disps_all_list[ic], torch.zeros((N,)+self.disps_all.shape[1:], dtype=torch.float)), dim=0)
+        for ic in range(self.multi):
+            self.images_all_list[ic] = torch.cat((self.images_all_list[ic], torch.zeros((N,)+self.images_all_list[ic].shape[1:], dtype=torch.uint8)), dim=0)
+            self.disps_all_list[ic] = torch.cat((self.disps_all_list[ic], torch.zeros((N,)+self.disps_all_list[ic].shape[1:], dtype=torch.float)), dim=0)
         for ii in range(N):
             self.kf_stamps_all[self.offset.value+ii] = self.video.kf_stamps[ii]
             self.poses_all[self.offset.value+ii] = self.video.poses[ii].clone().cpu()
-            self.images_all[self.offset.value+ii] = self.video.images[ii].clone().cpu()
-            self.disps_all[self.offset.value+ii] = self.video.disps[ii].clone().cpu()
             self.fmaps_all[self.offset.value+ii] = self.video.fmaps[ii].clone().cpu()
             self.nets_all[self.offset.value+ii] = self.video.nets[ii].clone().cpu()
             self.inps_all[self.offset.value+ii] = self.video.inps[ii].clone().cpu()
             if self.vis:
                 self.disps_up_all[self.offset.value+ii] = self.video.disps_up[ii].clone().cpu()
-            if self.multi:
-                for ic in range(1, self.multi-1):
-                    self.images_all_list[ic][self.offset.value+ii] = self.video.images_list[ic][ii].clone().cpu()
-                    self.disps_all_list[ic][self.offset.value+ii] = self.video.disps_list[ic][ii].clone().cpu()
+            for ic in range(self.multi):
+                self.images_all_list[ic][self.offset.value+ii] = self.video.images_list[ic][ii].clone().cpu()
+                self.disps_all_list[ic][self.offset.value+ii] = self.video.disps_list[ic][ii].clone().cpu()
 
         self.offset.value += N
         self.video.counter.value -= N
@@ -92,17 +94,13 @@ class GlobalBuffer:
                 self.video.intrinsics.shape[2]).clone(), }
         if self.vis:
             datatodump['disps_up'] = self.disps_up_all[: self.video.total_counter].clone()
-        if self.multi:
-            for ic in range(1, self.multi-1):
-                datatodump[f'images{ic+1}'] = self.images_all_list[ic][:self.video.total_counter].clone()
-                datatodump[f'disps{ic+1}'] = self.disps_all_list[ic][:self.video.total_counter].clone()
+        for ic in range(1, self.multi):
+            datatodump[f'images{ic+1}'] = self.images_all_list[ic][:self.video.total_counter].clone()
+            datatodump[f'disps{ic+1}'] = self.disps_all_list[ic][:self.video.total_counter].clone()
         torch.save(datatodump, output)
 
     @torch.cuda.amp.autocast(enabled=False)
     def add_rel_poses(self, ii, jj, target, weight, index=0, iter=None):
-        mask = ii != jj
-        ii, jj, target, weight = ii[mask], jj[mask], target[:, mask], weight[:, mask]
-
         if iter is not None:
             import shutil
             import numpy as np
@@ -149,15 +147,14 @@ class GlobalBuffer:
         rel_poses = poses[:, jj] * poses[:, ii].inv()
         if index > 0:
             rel_poses = self.video.T_ci_c0[index] * rel_poses * self.video.T_ci_c0[index].inv()
-        rel_poses.data[:, ii == jj] = self.video.base
 
         for _ in range(4):
             if index > 0:
                 coords, valid, (_, Jj, _) = pops.projective_transform(
-                    None, self.video.disps_list[index][None], self.video.intrinsics[None, :, [index+1]], self.video.base, ii, jj, jacobian=True, Gij=rel_poses)
+                    None, self.video.disps_list[index][None], self.video.K(index), ii, jj, jacobian=True, Gij=rel_poses)
             else:
                 coords, valid, (_, Jj, _) = pops.projective_transform(
-                    None, self.video.disps[None], self.video.intrinsics[None], self.video.base, ii, jj, jacobian=True, Gij=rel_poses)
+                    None, self.video.disps[None], self.video.K(0), ii, jj, jacobian=True, Gij=rel_poses)
             r = (target - coords).view(1, N, -1, 1)
             w = .001 * (valid * weight).view(1, N, -1, 1)
             Jj = Jj.reshape(1, N, -1, 6)

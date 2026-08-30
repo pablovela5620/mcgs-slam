@@ -96,19 +96,29 @@ The Rerun recording contains the multi-camera rig (frustums + images), the
 per-keyframe estimated depth, the rig trajectory, and Gaussian-map snapshots
 logged with the native `GaussianSplats3D` archetype (rerun >= 0.36).
 
+### Multi-camera rig order
+
+Each `--imagedir` entry is a mapped camera. The rows of `T_cami_cam0` must
+match the directory order, with camera 0 as identity. The trajectory is
+up-to-scale; evaluate it with scale alignment (`evo_ape -as`). Online depth
+normalization is disabled because changing tracker scale alone would
+desynchronize the live Gaussian map.
+
 ### Manual invocation
 
 ```bash
 export seq=data/100613
 pixi run python demo.py --calib calib/100613.yml \
-               --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+               --imagedir ${seq}/front ${seq}/front_left ${seq}/front_right \
                --stride 1 \
                --output output/100613 \
                --rrd output/100613/mcgs_slam.rrd
 ```
 
 `--rerun-spawn` opens a live viewer, `--rr-splat-every N` controls the
-Gaussian snapshot cadence. The legacy OpenGL viewer behind `--gsvis` needs
+Gaussian snapshot cadence. `--decode-reduced` decodes JPEGs at half size
+(≈2× faster image loading; tested mean absolute pixel deviation <2/255 and
+99th percentile ≤16/255 versus the full-resolution path). The legacy OpenGL viewer behind `--gsvis` needs
 glfw/imgviz/PyOpenGL, which the pixi env does not ship — add them yourself
 (`pixi add glfw pyopengl` + `pixi add --pypi imgviz glm`) if you want it.
 
@@ -129,11 +139,9 @@ pixi run python demo.py --calib calib/drones.yml \
                --rrd output/airsim-garden/mcgs_slam.rrd
 ```
 
-The imagedir order must match `calib/drones.yml`: directory 1
-(`front_center`) is the stereo partner of directory 0 (`front_left`) and is
-dropped from the mapped set, so the four mapped cameras are front_left,
-front_right, left_center, right_center. For ATE, convert the dataset's GT
-poses to TUM format first (the quaternions are xyzw).
+The imagedir order must match `calib/drones.yml`; all five directories are
+mapped. For ATE, convert the dataset's GT poses to TUM format first (the
+quaternions are xyzw) and use scale alignment (`-as`).
 
 ### ATE (RMSE)
 ```bash
@@ -148,6 +156,38 @@ python vis_tsdf_per_cam.py --result output/100613
 
 ---
 
+## 🗂️ Catalog mode: robocap segments with Basalt poses
+
+`infer_catalog.py` maps a segment straight from a Rerun catalog instead of image
+directories. It takes the recorded Basalt VIO poses as truth — no DROID tracker,
+no bundle adjustment, no mapper pose refinement — and gets depth from MoGe-2
+only, so the map is metric and the whole path is: catalog → torchcodec decode
+(NVDEC, via `simplecv.wrap_mp4`) → Kannala-Brandt fisheye rectified to 110°
+virtual pinholes (640×360) → MoGe-2 depth + normals → Gaussian mapper in metres.
+
+```bash
+pixi run python infer_catalog.py --start 0 --end 10 --output output/robocap --refine-iters 2000
+# --catalog-url / --dataset-name / --segment-id select the segment (defaults: robocap s00000021)
+# --dataset-id optionally overrides the dataset-name lookup with an exact UUID
+# --kf-dist 0.3 / --kf-angle 15 : new keyframe after that much Basalt motion
+# --decoder cpu                 : torchcodec on the CPU instead of NVDEC
+```
+
+Cameras `left_front`, `right_front`, `left`, `right` are used; the two eye
+cameras look at the wearer and are skipped. Outputs: `mcgs_catalog.rrd`
+(simplecv `exoego:v2` layout — the original H.264 packets relayed under each
+camera's native pinhole, the rectified image/depth/render under a sibling
+`rectified` pinhole, `world_T_rig` on `/world/rig_00`), `3dgs_final.ply`, and
+the PSNR JSON. Mapper settings for metric scenes live in
+`config/config_robocap.yaml`. `pixi run test-integration` runs one live-catalog
+smoke test; the default `pixi run test` needs no network.
+
+Known limitation: per-view monocular depth is not multi-view consistent, so the
+map shows floaters and stretched splats from outside even though the training
+views render well (10 s of s00000021: PSNR 19.2 dB at 2 000 refinement
+iterations, 20.3 dB at 30 000). A frozen-pose multi-view depth refinement is
+the next step.
+
 ## 🧪 Modes
 
 ### 1. **Full Optimization Mode (MCBA + JDSA + Prior Depth)**
@@ -156,8 +196,8 @@ This mode uses multi-camera bundle adjustment with joint depth–scale alignment
 
 ```bash
 export seq=data/100613
-python demo.py --calib calib/100613.yml \
-                         --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+pixi run python demo.py --calib calib/100613.yml \
+                         --imagedir ${seq}/front ${seq}/front_left ${seq}/front_right \
                          --stride 1 \
                          --output output/100613 \
                          --prgbd --jdsa
@@ -165,12 +205,12 @@ python demo.py --calib calib/100613.yml \
 
 ### 2. **MCBA + Prior Depth Only (without JDSA)**
 
-JDSA is disabled. Depth is still initialized via priors (e.g., Metric3D).
+JDSA is disabled. Depth is still initialized via the MoGe-2 prior.
 
 ```bash
 export seq=data/100613
-python demo.py --calib calib/100613.yml \
-                         --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+pixi run python demo.py --calib calib/100613.yml \
+                         --imagedir ${seq}/front ${seq}/front_left ${seq}/front_right \
                          --stride 1 \
                          --output output/100613 \
                          --prgbd
@@ -182,8 +222,8 @@ A simpler version of our method using only multi-view photometric and geometric 
 
 ```bash
 export seq=data/100613
-python demo.py --calib calib/100613.yml \
-                         --imagedir ${seq}/front ${seq}/front_right ${seq}/front_left ${seq}/front_right \
+pixi run python demo.py --calib calib/100613.yml \
+                         --imagedir ${seq}/front ${seq}/front_left ${seq}/front_right \
                          --stride 1 \
                          --output output/100613
 ```
@@ -194,7 +234,6 @@ python demo.py --calib calib/100613.yml \
 
 * Python 3.8+
 * PyTorch >= 1.13.0 (CUDA 11.8)
-* OpenMMLab stack: `mmengine`, `mmcv`
 * NumPy, OpenCV, PyYAML, etc. (installed via `environment.yaml`)
 
 ---

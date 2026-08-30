@@ -85,11 +85,14 @@ def actp(Gij, X0, jacobian=False):
 
     return X1, None
 
-def projective_transform(poses, depths, intrinsics, base, ii, jj, jacobian=False, return_depth=False, Tcb=None, Gij=None):
+def projective_transform(poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False, Tcb=None, Gij=None):
     """ map points from ii->jj """
 
+    if jacobian and Gij is not None and Tcb is not None:
+        raise ValueError("Gij and Tcb cannot both be supplied when jacobian=True")
+
     # inverse project
-    X0, Jz = iproj(depths[:,ii], intrinsics[:,ii,0], jacobian=jacobian)
+    X0, Jz = iproj(depths[:,ii], intrinsics[:,ii], jacobian=jacobian)
 
     # transform
     if Gij is None:
@@ -98,12 +101,11 @@ def projective_transform(poses, depths, intrinsics, base, ii, jj, jacobian=False
             Gij = Gibj * Tcb.inv()
         else:
             Gij = poses[:,jj] * poses[:,ii].inv()
-        Gij.data[:, ii==jj] = base
 
     X1, Ja = actp(Gij, X0, jacobian=jacobian)
 
     # project
-    x1, Jp = proj(X1, intrinsics[:,jj,0], jacobian=jacobian, return_depth=return_depth)
+    x1, Jp = proj(X1, intrinsics[:,jj], jacobian=jacobian, return_depth=return_depth)
 
     # exclude points too far to camera
     basesize = 1 / torch.clamp(torch.norm(Gij.data[:, :, :3], dim=2)*40, min=5., max=100.)
@@ -112,7 +114,6 @@ def projective_transform(poses, depths, intrinsics, base, ii, jj, jacobian=False
 
     if jacobian:
         # Ji transforms according to dual adjoint
-        # Ja[:, ii==jj] = 0
         Jj = torch.matmul(Jp, Ja)
         if Tcb is not None:
             Ji = -Gibj[:,:,None,None,None].adjT(Jj)
@@ -127,7 +128,7 @@ def projective_transform(poses, depths, intrinsics, base, ii, jj, jacobian=False
 
     return x1, valid
 
-def induced_flow(poses, disps, intrinsics, base, ii, jj):
+def induced_flow(poses, disps, intrinsics, ii, jj):
     """ optical flow induced by camera motion """
 
     ht, wd = disps.shape[2:]
@@ -136,7 +137,7 @@ def induced_flow(poses, disps, intrinsics, base, ii, jj):
         torch.arange(wd).to(disps.device).float(), indexing='ij')
 
     coords0 = torch.stack([x, y], dim=-1)
-    coords1, valid = projective_transform(poses, disps, intrinsics, base, ii, jj, False, True)
+    coords1, valid = projective_transform(poses, disps, intrinsics, ii, jj, False, True)
 
     valid *= (coords1[..., 2] > 0.2).unsqueeze(-1)
     return coords1[...,:2] - coords0, valid

@@ -1,5 +1,7 @@
 import random
 import time
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -15,10 +17,48 @@ from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
 from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
+from camera_packet import CameraPacket, GlobalCameraPacket
 try:
     from gaussian.gui import gui_utils, slam_gui
 except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
     gui_utils = slam_gui = None
+
+
+_GAUSSIAN_RESET_INTERVAL: int = 501
+
+
+@dataclass(slots=True)
+class CameraProjection:
+    """Pinhole calibration and projection matrix for one camera."""
+
+    K: list[float | int]
+    """Camera parameters ``[fx, fy, cx, cy, width, height]``."""
+    matrix: torch.Tensor
+    """Transposed 4x4 projection matrix on the requested device."""
+
+
+def build_camera_projection(
+    intrinsics: torch.Tensor,
+    image_hw: tuple[int, int],
+    device: str = "cuda",
+    znear: float = 0.01,
+    zfar: float = 100.0,
+) -> CameraProjection:
+    """Build one camera's projection from pixel intrinsics and image size."""
+    height, width = image_hw
+    fx, fy, cx, cy = (float(value) for value in intrinsics[:4])
+    K: list[float | int] = [fx, fy, cx, cy, width, height]
+    matrix = getProjectionMatrix2(
+        znear=znear,
+        zfar=zfar,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        W=width,
+        H=height,
+    ).transpose(0, 1).to(device=device)
+    return CameraProjection(K=K, matrix=matrix)
 
 class GSBackEnd(mp.Process):
     def __init__(self, config, save_dir, use_gui=False, rr_logger=None):
@@ -32,19 +72,18 @@ class GSBackEnd(mp.Process):
         self.initialized = False
         self.save_dir = save_dir
         self.use_gui = use_gui
+        self.camera_projections: dict[int, CameraProjection] = {}
 
         if self.use_gui and gui_utils is None:
             raise RuntimeError("--gsvis requires glfw/imgviz/PyOpenGL, which are not in the pixi env")
 
         self.opt_params = munchify(config["opt_params"])
-        self.config["Training"]["monocular"] = False
-
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
-        self.gaussians.init_lr(6.0)
+        self.cameras_extent = float(self.config["Dataset"].get("cameras_extent", 6.0))
+        self.gaussians.init_lr(self.cameras_extent)
         self.gaussians.training_setup(self.opt_params)
         self.background = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
 
-        self.cameras_extent = 6.0
         self.set_hyperparams()
 
         if self.use_gui:
@@ -70,9 +109,7 @@ class GSBackEnd(mp.Process):
         self.gaussian_update_offset = self.config["Training"]["gaussian_update_offset"]
         self.gaussian_th = self.config["Training"]["gaussian_th"]
         self.gaussian_extent = self.cameras_extent * self.config["Training"]["gaussian_extent"]
-        self.gaussian_reset = self.config["Training"]["gaussian_reset"]
         self.size_threshold = self.config["Training"]["size_threshold"]
-        self.window_size = self.config["Training"]["window_size"]
         self.lambda_dnormal = self.config["Training"]["lambda_dnormal"]
 
 
@@ -83,32 +120,45 @@ class GSBackEnd(mp.Process):
                 render_pkg = render(vp, self.gaussians, self.background)
                 self.rr.log_render_comparison(cam_idx, render_pkg["render"], vp.original_image)
 
-    def process_track_data(self, packet):
-        if not hasattr(self, "projection_matrix"):
-            H, W = packet["images"].shape[-2:]
-            self.K = K = list(packet["intrinsics"][0]) + [W, H]
-            self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
+    def _projection_for_camera(
+        self,
+        cam_idx: int,
+        intrinsics: torch.Tensor,
+        image_hw: tuple[int, int],
+    ) -> CameraProjection:
+        """Return the cached projection for one camera, building it on first use."""
+        if cam_idx not in self.camera_projections:
+            dataset_config = self.config["Dataset"]
+            self.camera_projections[cam_idx] = build_camera_projection(
+                intrinsics,
+                image_hw,
+                znear=float(dataset_config.get("znear", 0.01)),
+                zfar=float(dataset_config.get("zfar", 100.0)),
+            )
+        return self.camera_projections[cam_idx]
 
-        cam_idx = packet.get('cam_idx', 0)
+    def process_track_data(self, packet: CameraPacket):
+        H, W = packet["images"].shape[-2:]
+        cam_idx = int(packet.get('cam_idx', 0))
+        projection = self._projection_for_camera(cam_idx, packet["intrinsics"][0], (H, W))
         w2c = SE3(packet["poses"]).matrix().cuda()
-        for i, idx in enumerate(packet['viz_idx']):
-            idx = idx.item()
-            idx = packet['tstamp'][i].item()
-            tstamp = packet['tstamp'][i].item()
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
-            if idx not in self.current_window:
-                self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
+        for i, view_id_tensor in enumerate(packet["view_ids"]):
+            view_id: int = int(view_id_tensor.item())
+            frame_id: int = int(packet["frame_ids"][i].item())
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], view_id, projection.matrix, projection.K, frame_id, cam_idx=cam_idx)
+            if view_id not in self.current_window:
+                self.current_window = [view_id] + self.current_window[:-1] if len(self.current_window) > 10 else [view_id] + self.current_window
                 if not self.initialized:
                     self.reset()
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(0, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
-                    self.initialize_map(0, viewpoint)
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
+                    self.initialize_map(view_id, viewpoint)
                     self.initialized = True
-                elif idx not in self.viewpoints:
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(idx, viewpoint, depth_map=packet["depths"][i].numpy())
+                elif view_id not in self.viewpoints:
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][i].numpy())
                 else:
-                    self.viewpoints[idx] = viewpoint
+                    self.viewpoints[view_id] = viewpoint
 
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
@@ -129,54 +179,86 @@ class GSBackEnd(mp.Process):
                     gtcolor=viewpoint.original_image,
                     gtdepth=viewpoint.depth.numpy()))
 
-    def process_global_track_data(self, packet, cam_num):
-        if not hasattr(self, "projection_matrix"):
-            H, W = packet["images"].shape[-2:]
-            self.K = K = list(packet["intrinsics"][0]) + [W, H]
-            self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
+    def _apply_global_corrections(self, packet: GlobalCameraPacket) -> None:
+        """Apply packet corrections to matched Gaussians in provenance order."""
+        pose_updates = packet["pose_updates"]
+        if pose_updates is None:
+            return
+        scale_updates = packet["scale_updates"]
+        if scale_updates is None:
+            raise ValueError("scale_updates are required when pose_updates are supplied")
 
-        if packet['pose_updates'] is not None:
+        view_ids: list[int] = [int(value) for value in packet["view_ids"].tolist()]
+        correction_rows: list[int] = [
+            int(value) for value in packet["pose_update_indices"].tolist()
+        ]
+        assert len(view_ids) == len(set(view_ids)), (
+            "each view id must have at most one correction row"
+        )
+        view_id_to_correction_row: dict[int, int] = dict(
+            zip(view_ids, correction_rows, strict=True)
+        )
+
+        gaussian_view_ids: list[int] = [
+            int(value) for value in self.gaussians.unique_kfIDs.tolist()
+        ]
+        matched_mask_cpu: torch.Tensor = torch.tensor(
+            [view_id in view_id_to_correction_row for view_id in gaussian_view_ids],
+            dtype=torch.bool,
+        )
+        if not torch.any(matched_mask_cpu):
+            return
+        matched_rows: list[int] = [
+            view_id_to_correction_row[view_id]
+            for view_id in gaussian_view_ids
+            if view_id in view_id_to_correction_row
+        ]
+
+        xyz = self.gaussians.get_xyz
+        device: torch.device = xyz.device
+        matched_mask = matched_mask_cpu.to(device=device)
+        pose_indices = torch.tensor(matched_rows, dtype=torch.long, device=device)
+        updates = SE3(pose_updates.data.to(device=device))[pose_indices]
+        updates_scale = scale_updates.to(device=device)[pose_indices]
+        self.gaussians._xyz[matched_mask] = (
+            updates * xyz[matched_mask]
+        ) / updates_scale
+
+        scale = self.gaussians.get_scaling[matched_mask] / updates_scale
+        self.gaussians._scaling[matched_mask] = (
+            self.gaussians.scaling_inverse_activation(scale)
+        )
+
+        rotation = SO3(self.gaussians.get_rotation[matched_mask])
+        corrected_rotation = SO3(updates.data[:, 3:]) * rotation
+        self.gaussians._rotation[matched_mask] = corrected_rotation.data
+
+    def process_global_track_data(self, packet: GlobalCameraPacket):
+        if packet["pose_updates"] is not None:
             with torch.no_grad():
-                tstamps = packet['tstamp']
-                indices = (tstamps.unsqueeze(1) == self.gaussians.unique_kfIDs.unsqueeze(0)).nonzero()[:, 0] % int(tstamps.shape[0] / cam_num)
-                updates = packet['pose_updates'].cuda()[indices]
-                updates_scale = packet['scale_updates'].cuda()[indices]
-                
-                xyz = self.gaussians.get_xyz
-                xyz = (updates * xyz) / updates_scale
-                self.gaussians._xyz[:] = xyz
+                self._apply_global_corrections(packet)
 
-                scale = self.gaussians.get_scaling
-                scale = scale / updates_scale
-                self.gaussians._scaling[:] = self.gaussians.scaling_inverse_activation(scale)
- 
-                rot = SO3(self.gaussians.get_rotation)
-                rot = SO3(updates.data[:,3:]) * rot
-                self.gaussians._rotation[:] = rot.data
-
-        # packet stacks all cameras in order [cam0 frames, cam1 frames, ...],
-        # so the camera index of frame i is i // n_per_cam.
-        n_per_cam = max(1, len(packet['viz_idx']) // cam_num)
+        H, W = packet["images"].shape[-2:]
         w2c = SE3(packet["poses"]).matrix().cuda()
-        for i, idx in enumerate(packet['viz_idx']):
-            idx = idx.item()
-            idx = packet['tstamp'][i].item()
-            tstamp = packet['tstamp'][i].item()
-            cam_idx = i // n_per_cam
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp, cam_idx=cam_idx)
-            if idx not in self.current_window:
-                self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
+        for i, view_id_tensor in enumerate(packet["view_ids"]):
+            view_id: int = int(view_id_tensor.item())
+            frame_id: int = int(packet["frame_ids"][i].item())
+            cam_idx = int(packet["cam_indices"][i])
+            projection = self._projection_for_camera(cam_idx, packet["intrinsics"][i], (H, W))
+            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], view_id, projection.matrix, projection.K, frame_id, cam_idx=cam_idx)
+            if view_id not in self.current_window:
+                self.current_window = [view_id] + self.current_window[:-1] if len(self.current_window) > 10 else [view_id] + self.current_window
                 if not self.initialized:
                     self.reset()
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(0, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
-                    self.initialize_map(0, viewpoint)
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
+                    self.initialize_map(view_id, viewpoint)
                     self.initialized = True
-                elif idx not in self.viewpoints:
-                    self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(idx, viewpoint, depth_map=packet["depths"][i].numpy())
+                elif view_id not in self.viewpoints:
+                    self.viewpoints[view_id] = viewpoint
+                    self.add_next_kf(view_id, viewpoint, depth_map=packet["depths"][i].numpy())
                 else:
-                    self.viewpoints[idx] = viewpoint
+                    self.viewpoints[view_id] = viewpoint
 
         self.map(self.current_window, iters=10)
         # self.map(self.current_window, iters=1, prune=True)
@@ -216,13 +298,32 @@ class GSBackEnd(mp.Process):
         poses_cw.sort(key=lambda x: x[0])
         return np.stack(poses_cw)
 
+    def refine_existing_viewpoints(self, *, iters: int) -> None:
+        """Refine the current trusted-pose window without rebuilding viewpoints."""
+        if iters < 1:
+            raise ValueError("iters must be positive")
+        self.map(self.current_window, iters=iters)
+        if self.rr is not None:
+            self._log_renders(
+                {viewpoint.cam_idx: viewpoint for viewpoint in self.viewpoints.values()}
+            )
+
     @torch.no_grad()
-    def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx):
+    def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx, cam_idx=0):
+        if cam_idx not in self.camera_projections:
+            raise RuntimeError(f"no projection is cached for camera {cam_idx}")
+        projection = self.camera_projections[cam_idx]
         eval_rendering(gtimages, gtdepthdir, traj, self.gaussians,self.save_dir, self.background,
-            self.projection_matrix, self.K, kf_idx, iteration="after_opt")
+            projection.matrix, projection.K, kf_idx, iteration="after_opt")
     
-    def eval_rendering_kf(self):
-        eval_rendering_kf(self.viewpoints, self.gaussians, self.save_dir, self.background, iteration="after_opt")
+    def eval_rendering_kf(self) -> dict[str, float]:
+        return eval_rendering_kf(
+            self.viewpoints,
+            self.gaussians,
+            self.save_dir,
+            self.background,
+            iteration="after_opt",
+        )
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None):
         self.gaussians.extend_from_pcd_seq(
@@ -338,8 +439,7 @@ class GSBackEnd(mp.Process):
                     )
 
                 ## Opacity reset
-                self.gaussian_reset = 501
-                if (self.iteration_count % self.gaussian_reset) == 0 and (not update_gaussian):
+                if (self.iteration_count % _GAUSSIAN_RESET_INTERVAL) == 0 and (not update_gaussian):
                     Log("Resetting the opacity of non-visible Gaussians")
                     self.gaussians.reset_opacity_nonvisible(visibility_filter_acm)
 

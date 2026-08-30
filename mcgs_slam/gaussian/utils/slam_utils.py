@@ -230,6 +230,27 @@ def get_loss_mapping_rgb(config, image, depth, viewpoint):
     return l1_rgb.mean()
 
 
+def masked_inverse_depth_l1(
+    rendered_depth: torch.Tensor,
+    prior_depth: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Return finite inverse-depth L1 with invalid zero depths excluded.
+
+    Args:
+        rendered_depth: Rendered metric depth.
+        prior_depth: Prior metric depth with zero used for invalid pixels.
+        valid_mask: Boolean mask selecting valid samples in both inputs.
+
+    Returns:
+        Scalar mean inverse-depth error over the full image extent.
+    """
+    safe_rendered = torch.where(valid_mask, rendered_depth, torch.ones_like(rendered_depth))
+    safe_prior = torch.where(valid_mask, prior_depth, torch.ones_like(prior_depth))
+    inverse_error = torch.abs(safe_rendered.reciprocal() - safe_prior.reciprocal())
+    return (inverse_error * valid_mask).mean()
+
+
 def get_loss_mapping_rgbd(config, image, depth, viewpoint):
     alpha = config["Training"]["alpha"] if "alpha" in config["Training"] else 0.95
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
@@ -241,7 +262,7 @@ def get_loss_mapping_rgbd(config, image, depth, viewpoint):
     depth_pixel_mask = torch.logical_and(gt_depth > 0.01, depth > 0.01).view(*depth.shape)
 
     l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask).mean()
-    l1_depth = torch.abs(1./depth * depth_pixel_mask - 1./gt_depth * depth_pixel_mask).mean()
+    l1_depth = masked_inverse_depth_l1(depth, gt_depth, depth_pixel_mask)
     return alpha * l1_rgb + (1 - alpha) * l1_depth * 5
 
 

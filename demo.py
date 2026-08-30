@@ -1,26 +1,24 @@
 #!/home/wei/miniconda3/envs/mcgs/bin/python
-import os    # nopep8
-import sys   # nopep8
-_ROOT = os.path.dirname(os.path.abspath(__file__))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'mcgs_slam'))   # nopep8
-# CUDA extensions are built in-place by `pixi run build` (see pixi.toml).
-sys.path.append(os.path.join(_ROOT, 'thirdparty/lietorch'))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'thirdparty/simple-knn'))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'thirdparty/diff-gaussian-rasterization'))   # nopep8
-sys.path.append(os.path.join(_ROOT, 'thirdparty/mmcv-shim'))   # for Metric3D via torch.hub  # nopep8
+from mcgs_slam._paths import configure_import_paths  # nopep8
 
+configure_import_paths()  # nopep8
+
+import os
 import cv2
 import time
 import torch
 import numpy as np
 
-from mcgs import Mcgs, SCALE_FACTOR
+from mcgs import Mcgs
 from tqdm import tqdm
 from mcgs_slam.utils import save_utils
 from mcgs_slam.streams import image_stream
 from mcgs_slam.options import get_args, load_configs
-from rerun_logger import RerunLogger
+from rerun_logger_waymo import WaymoRerunLogger
 from utils.plot_depth_map import colorize_np
+
+
+MAP_SCALE: float = 0.2
 
 
 def show_image(image, disp_est):
@@ -39,14 +37,22 @@ if __name__ == '__main__':
     os.makedirs(args.output, exist_ok=True)
 
     torch.multiprocessing.set_start_method('spawn')
+    # The stream runs on the main thread next to torch's OpenMP pool; letting cv2
+    # spawn its own pool per call oversubscribes the cores (measured ~2x slower).
+    cv2.setNumThreads(1)
 
     rr_logger = None
     if args.rrd or args.rerun_spawn:
-        rr_logger = RerunLogger(args.imagedir, args.stream_indices, scale_factor=SCALE_FACTOR,
-                                save_path=args.rrd, spawn=args.rerun_spawn,
-                                splat_every=args.rr_splat_every)
+        rr_logger = WaymoRerunLogger(
+            args.imagedir,
+            map_scale=MAP_SCALE,
+            save_path=args.rrd,
+            spawn=args.rerun_spawn,
+            splat_every=args.rr_splat_every,
+        )
+        rr_logger.send_blueprint()
 
-    mcgs = Mcgs(args, rr_logger=rr_logger)
+    mcgs = Mcgs(args, map_scale=MAP_SCALE, rr_logger=rr_logger)
     tstamps = {}
     t0 = time.time()
     N = len(os.listdir(args.imagedir[0])[::args.stride])

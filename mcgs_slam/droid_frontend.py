@@ -3,15 +3,32 @@ import torch
 from factor_graph import FactorGraph
 from collections import defaultdict
 
+
+def disparity_scale(estimated: torch.Tensor, sensor: torch.Tensor) -> torch.Tensor:
+    """Return the shared-support median disparity ratio."""
+    valid = (
+        torch.isfinite(estimated)
+        & torch.isfinite(sensor)
+        & (estimated > 0.0)
+        & (sensor > 0.0)
+    )
+    estimated_median = estimated[valid].median()
+    sensor_median = sensor[valid].median()
+    return torch.where(
+        torch.any(valid),
+        estimated_median / sensor_median,
+        estimated.new_tensor(1.0),
+    )
+
+
 class DroidFrontend:
     def __init__(self, net, video, args):
         self.video = video
         self.update_op = net.update
         self.corr_impl = "volume"
         self.graph = FactorGraph(video, net.update, corr_impl=self.corr_impl, max_factors=48)
-        self.multi = args.multi if args.multi > 2 else False
-        if self.multi:
-            self.graph_list = [self.graph] + [FactorGraph(video, net.update, corr_impl=self.corr_impl, max_factors=48, index=i) for i in range(1, self.multi-1)]
+        self.multi = args.multi
+        self.graph_list = [self.graph] + [FactorGraph(video, net.update, corr_impl=self.corr_impl, max_factors=48, index=i) for i in range(1, self.multi)]
 
         # local optimization window
         self.t0 = 0
@@ -37,13 +54,12 @@ class DroidFrontend:
         self.t1 = window
         shift = self.video.counter.value - window
         self.graph.release_buffer(window, shift)
-        if self.multi:
-            for graph in self.graph_list[1:]:
-                graph.release_buffer(window, shift)
+        for graph in self.graph_list[1:]:
+            graph.release_buffer(window, shift)
 
     @torch.no_grad()
     def __graph_update(self, iters, mode, t0=None, use_scaling=False):
-        if self.multi:
+        if len(self.graph_list) > 1:
             for itr in range(iters):
                 t0, target, weight, eta, ii, jj, mask, upmask = self.graph.update(t0=t0, tracking=('tracking' in mode), return_update=True)
                 targets, weights, etas, iis, jjs, masks, upmasks = [target], [weight], [eta], [ii], [jj], [mask], [upmask]
@@ -62,7 +78,7 @@ class DroidFrontend:
                     self.video.multi_cam_ba(t0, targets, weights, etas, iis, jjs, use_scaling=False)
                 
                 # TODO update disps_up
-                self.video.upsample(torch.unique(self.graph.ii[masks[0]]), upmasks[0], index=self.graph.index)
+                self.video.upsample_list(torch.unique(self.graph.ii[masks[0]]), upmasks[0], index=self.graph.index)
                 for graph in self.graph_list[1:]:
                     self.video.upsample_list(torch.unique(graph.ii[masks[graph.index]]), upmasks[graph.index], index=graph.index)      
         else:
@@ -82,17 +98,19 @@ class DroidFrontend:
 
         self.graph.add_proximity_factors(self.t1-5, max(self.t1-self.frontend_window, 0),
             rad=self.frontend_radius, nms=self.frontend_nms, thresh=self.frontend_thresh, beta=self.beta, remove=True)
-        if self.multi:
-            mask = self.graph.ii != self.graph.jj
-            for graph in self.graph_list[1:]:
-                graph.update_factors(self.graph.ii[mask], self.graph.jj[mask])  
+        for graph in self.graph_list[1:]:
+            graph.update_factors(self.graph.ii, self.graph.jj)
 
         # TODO JDSA
-        self.video.dscales[self.t1-1] = self.video.disps[self.t1-1].median() / self.video.disps_sens[self.t1-1].median()
+        self.video.dscales[self.t1-1] = disparity_scale(
+            self.video.disps[self.t1-1], self.video.disps_sens[self.t1-1]
+        )
         
-        if self.multi:
-            for idx in range(1, self.multi-1):
-                self.video.dscales_list[idx][self.t1-1] = self.video.disps_list[idx][self.t1-1].median() / self.video.disps_sens_list[idx][self.t1-1].median()
+        for idx in range(1, self.multi):
+            self.video.dscales_list[idx][self.t1-1] = disparity_scale(
+                self.video.disps_list[idx][self.t1-1],
+                self.video.disps_sens_list[idx][self.t1-1],
+            )
 
         self.__graph_update(self.iters1, mode="vision_only_tracking", use_scaling=True)
 
@@ -102,9 +120,8 @@ class DroidFrontend:
         # print(self.t1-2, self.video.counter.value, self.video.total_counter)
         if d.item() < self.keyframe_thresh and self.delete_count[self.video.total_counter-2] == 0:
             self.graph.rm_keyframe(self.t1 - 2)
-            if self.multi:
-                for graph in self.graph_list[1:]:
-                    graph.rm_keyframe(self.t1 - 2)
+            for graph in self.graph_list[1:]:
+                graph.rm_keyframe(self.t1 - 2)
             self.delete_count[self.video.total_counter-2] += 1
 
             with self.video.get_lock():
@@ -121,9 +138,8 @@ class DroidFrontend:
         # set pose for next itration
         self.video.poses[self.t1] = self.video.poses[self.t1-1]
         self.video.disps[self.t1] = self.video.disps[self.t1-1].mean()
-        if self.multi:
-            for i in range(1, self.multi-1):
-                self.video.disps_list[i][self.t1] = self.video.disps_list[i][self.t1-1].mean()
+        for i in range(1, self.multi):
+            self.video.disps_list[i][self.t1] = self.video.disps_list[i][self.t1-1].mean()
 
         # update visualization
         self.video.dirty[self.graph.ii.min():self.t1] = True
@@ -140,35 +156,34 @@ class DroidFrontend:
         self.t1 = self.video.counter.value
 
         self.graph.add_neighborhood_factors(self.t0, self.t1, r=3)
-        if self.multi:
-            for graph in self.graph_list[1:]:
-                graph.add_factors(self.graph.ii, self.graph.jj)
+        for graph in self.graph_list[1:]:
+            graph.add_factors(self.graph.ii, self.graph.jj)
 
         self.__graph_update(8, mode="vision_only", t0=1)
 
         self.graph.add_proximity_factors(0, 0, rad=2, nms=2, thresh=self.frontend_thresh, remove=False)
-        if self.multi:
-            mask = self.graph.ii != self.graph.jj
-            for graph in self.graph_list[1:]:
-                graph.add_factors(self.graph.ii[mask], self.graph.jj[mask])
+        for graph in self.graph_list[1:]:
+            graph.add_factors(self.graph.ii, self.graph.jj)
 
         # TODO JDSA
         for i in range(self.t1):
-            self.video.dscales[i] = self.video.disps[i].median() / self.video.disps_sens[i].median()
+            self.video.dscales[i] = disparity_scale(
+                self.video.disps[i], self.video.disps_sens[i]
+            )
         
-        if self.multi:
-            for idx in range(1, self.multi-1):
-                for i in range(self.t1):
-                    self.video.dscales_list[idx][i] = self.video.disps_list[idx][i].median() / self.video.disps_sens_list[idx][i].median()
+        for idx in range(1, self.multi):
+            for i in range(self.t1):
+                self.video.dscales_list[idx][i] = disparity_scale(
+                    self.video.disps_list[idx][i], self.video.disps_sens_list[idx][i]
+                )
 
         self.__graph_update(8, mode="vision_only", t0=1, use_scaling=True)
 
         # self.video.normalize()
         self.video.poses[self.t1] = self.video.poses[self.t1-1].clone()
         self.video.disps[self.t1] = self.video.disps[self.t1-4:self.t1].mean()
-        if self.multi:
-            for i in range(1, self.multi-1):
-                self.video.disps_list[i][self.t1] = self.video.disps_list[i][self.t1-4:self.t1].mean()
+        for i in range(1, self.multi):
+            self.video.disps_list[i][self.t1] = self.video.disps_list[i][self.t1-4:self.t1].mean()
 
         # initialization complete
         self.is_initialized = True
@@ -183,8 +198,8 @@ class DroidFrontend:
     def __del__(self):
         if self.graph.ii.shape[0] > 0:
             self.graph.rm_factors(self.graph.ii > 0, store=True)
-        if self.multi and self.graph_list[1].ii.shape[0] > 0:
-            for graph in self.graph_list[1:]:
+        for graph in self.graph_list[1:]:
+            if graph.ii.shape[0] > 0:
                 graph.rm_factors(graph.ii > 0, store=True)
 
     def __call__(self):

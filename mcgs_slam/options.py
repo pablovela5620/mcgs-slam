@@ -11,13 +11,13 @@ def get_args():
     parser.add_argument('--GPU', default=0, type=int)
 
     parser.add_argument("--imagedir", type=str, help="path to color image directory", nargs='+')
-    parser.add_argument("--posefile", type=str, help="path to pose file")
     parser.add_argument("--calib", type=str, help="path to calibration file")
     parser.add_argument("--t0", default=0, type=int, help="starting frame")
     parser.add_argument("--stride", default=3, type=int, help="frame stride")
-    parser.add_argument("--stereo", default=True, type=bool, help="stereo")
     parser.add_argument("--output", default="output", type=str, help="output file")
     parser.add_argument("--early_stop", default=-1, type=int, help="stoping frame")
+    parser.add_argument("--decode-reduced", dest="decode_reduced", action="store_true",
+                        help="decode JPEGs at half size (tested mean deviation <2/255; 99th percentile <=16/255)")
 
     parser.add_argument("--weights", default=os.path.dirname(__file__) + "/../pretrained_models/droid.pth")
     parser.add_argument("--config", default=os.path.dirname(__file__) + "/../config/config.yaml")
@@ -26,6 +26,10 @@ def get_args():
     parser.add_argument("--jdsa", action="store_true")
     parser.add_argument("--rgbd", action="store_true")
     parser.add_argument("--prgbd", action="store_true", help="pseudo rgbd")
+    parser.add_argument("--prior-encoder", dest="prior_encoder", default="vits", choices=["vits", "vitb", "vitl"],
+                        help="MoGe-2 backbone for the depth/normal prior")
+    parser.add_argument("--prior-level", dest="prior_level", default=3, type=int,
+                        help="MoGe-2 resolution level 0 (fastest) .. 9 (most detail)")
     parser.add_argument("--gsvis", action="store_true")
 
     parser.add_argument("--rrd", type=str, default=None, help="save a Rerun recording (.rrd) to this path")
@@ -46,7 +50,7 @@ def get_args():
     parser.add_argument("--backend_nms", type=int, default=3)
 
     args = parser.parse_args()
-    args.multi = len(args.imagedir) if len(args.imagedir) > 2 else False
+    args.multi = len(args.imagedir)
     return args
 
 
@@ -56,14 +60,23 @@ def load_configs(args):
     args.camera = params['camera']
     print("Camera model:", args.camera)
 
-    args.base = np.array(params['baseline'])
-    if args.multi:
-        args.T_cami_cam0 = torch.as_tensor(params['T_cami_cam0'], dtype=torch.float, device="cuda")
+    args.multi = len(args.imagedir)
+    if len(args.calib) != args.multi:
+        raise ValueError(
+            f"intrinsic has {len(args.calib)} rows but --imagedir has {args.multi} entries"
+        )
 
-    # The tracker drops input dir 1 (the stereo-right duplicate) when filling
-    # the video buffers, so video-order cameras map to these stream columns.
-    args.stream_indices = ([0] + list(range(2, args.multi))) if args.multi else [0]
-
+    rig_rows = params['T_cami_cam0']
+    if len(rig_rows) != args.multi:
+        raise ValueError(
+            f"T_cami_cam0 has {len(rig_rows)} rows but --imagedir has {args.multi} entries"
+        )
+    camera_zero_se3 = np.asarray(rig_rows[0], dtype=np.float64)
+    identity_translation_and_vector = np.allclose(camera_zero_se3[:6], 0.0)
+    identity_quaternion_scalar = np.isclose(abs(camera_zero_se3[6]), 1.0)
+    if not identity_translation_and_vector or not identity_quaternion_scalar:
+        raise ValueError("T_cami_cam0[0] must be the identity transform")
+    args.T_cami_cam0 = torch.as_tensor(rig_rows, dtype=torch.float)
     args.timescale = float(params['timescale'])
 
     if 'ht' in params and 'wd' in params:

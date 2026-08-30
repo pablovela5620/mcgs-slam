@@ -30,14 +30,11 @@ def iproj_single(poses, intrinsic, disps, index):
 def save_pc(args, video, output, suffix=''):
     index = torch.arange(video.total_counter, device="cpu")
     poses = torch.index_select(video.globuf.poses_all, 0, index)
-    disps = torch.index_select(video.globuf.disps_all, 0, index)
-    images = torch.index_select(video.globuf.images_all, 0, index)
-    save_pc_one(poses.cuda(), disps.cuda(), images, video.intrinsics[0, 0], index.cuda(), 1, output, suffix)
-    for ix in range(1, args.multi-1):
+    for ix in range(args.multi):
         posesi = (video.T_ci_c0[ix] * lietorch.SE3(poses.cuda()[None])).data[0]
         imagesi = torch.index_select(video.globuf.images_all_list[ix], 0, index)
         dispsi = torch.index_select(video.globuf.disps_all_list[ix], 0, index)
-        save_pc_one(posesi, dispsi.cuda(), imagesi, video.intrinsics[0,ix+1], index.cuda(), ix+1, output, suffix)
+        save_pc_one(posesi, dispsi.cuda(), imagesi, video.K_row(ix), index.cuda(), ix+1, output, suffix)
 
 def pcwrite(filename, points, colors):
     """Save a point cloud to a polygon .ply file.
