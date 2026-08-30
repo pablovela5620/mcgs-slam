@@ -156,6 +156,37 @@ python vis_tsdf_per_cam.py --result output/100613
 
 ---
 
+## 🗂️ Catalog mode: robocap segments with Basalt poses
+
+`infer_catalog.py` maps a segment straight from a Rerun catalog instead of image
+directories. It takes the recorded Basalt VIO poses as truth — no DROID tracker,
+no bundle adjustment, no mapper pose refinement — and gets depth from MoGe-2
+only, so the map is metric and the whole path is: catalog → torchcodec decode
+(NVDEC, via `simplecv.wrap_mp4`) → Kannala-Brandt fisheye rectified to 110°
+virtual pinholes (640×360) → MoGe-2 depth + normals → Gaussian mapper in metres.
+
+```bash
+pixi run python infer_catalog.py --start 0 --end 10 --output output/robocap --refine-iters 2000
+# --catalog-url / --dataset-id / --segment-id select the segment (defaults: robocap s00000021)
+# --kf-dist 0.3 / --kf-angle 15 : new keyframe after that much Basalt motion
+# --decoder cpu                 : torchcodec on the CPU instead of NVDEC
+```
+
+Cameras `left_front`, `right_front`, `left`, `right` are used; the two eye
+cameras look at the wearer and are skipped. Outputs: `mcgs_catalog.rrd`
+(simplecv `exoego:v2` layout — the original H.264 packets relayed under each
+camera's native pinhole, the rectified image/depth/render under a sibling
+`rectified` pinhole, `world_T_rig` on `/world/rig_00`), `3dgs_final.ply`, and
+the PSNR JSON. Mapper settings for metric scenes live in
+`config/config_robocap.yaml`. `pixi run test-integration` runs one live-catalog
+smoke test; the default `pixi run test` needs no network.
+
+Known limitation: per-view monocular depth is not multi-view consistent, so the
+map shows floaters and stretched splats from outside even though the training
+views render well (10 s of s00000021: PSNR 19.2 dB at 2 000 refinement
+iterations, 20.3 dB at 30 000). A frozen-pose multi-view depth refinement is
+the next step.
+
 ## 🧪 Modes
 
 ### 1. **Full Optimization Mode (MCBA + JDSA + Prior Depth)**
