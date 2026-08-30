@@ -143,7 +143,7 @@ class Mcgs:
             viz_idx = self.frontend()
 
             if self.video.counter.value >= (self.video.buffer - 15):
-                window = 35
+                window = min(35, self.video.buffer - 15)
                 self.frontend.release_buffer(window=window)
                 self.video.release_buffer(window=window)
         
