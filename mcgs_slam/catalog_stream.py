@@ -33,6 +33,7 @@ RIG_PATH: str = f"/world/{entity_id('rig', 0)}"
 CAMERA_IDS: tuple[int, ...] = (0, 1, 4, 5)
 MAX_JOIN_NS: int = 1_000_000
 KEYFRAME_PREROLL_NS: int = 1_100_000_000
+DECODE_CHUNK_SIZE: int = 8
 
 DecoderDevice: TypeAlias = Literal["cuda", "cpu"]
 
@@ -322,9 +323,7 @@ class CatalogWindow:
         if start_seconds < 0.0 or end_seconds <= start_seconds:
             raise ValueError("expected 0 <= start_seconds < end_seconds")
         self.segment: RobocapSegment = segment
-        self.rectifiers: tuple[FisheyeRectifier, ...] = tuple(
-            FisheyeRectifier(camera) for camera in segment.rig_calibration.cameras
-        )
+        self.rectifiers: tuple[FisheyeRectifier, ...] = segment.rectifiers
         start_ns: int = segment.segment_video_start_ns + round(start_seconds * 1e9)
         end_ns: int = segment.segment_video_start_ns + round(end_seconds * 1e9)
         self.relay_streams: tuple[RawVideoStream, ...] = tuple(
@@ -389,42 +388,59 @@ class CatalogWindow:
         self._closed = True
 
     def keyframes(self) -> Iterator[CatalogKeyframe]:
-        """Decode each camera once in a batch, then yield selected rig frames."""
+        """Decode and rectify bounded four-camera chunks, then yield rig frames."""
         if self._closed:
             raise RuntimeError("catalog window is closed")
 
-        rectified_by_camera: list[UInt8[torch.Tensor, "n_keyframes 3 360 640"]] = []
-        for camera_index, stream in enumerate(self.relay_streams):
-            decoder = stream.decoder
-            if decoder is None:
-                raise RuntimeError("catalog decoder was released before keyframe decoding")
-            decoder_indices: list[int] = [int(index) for index in self._stream_indices[camera_index]]
-            decoded_n3hw: UInt8[torch.Tensor, "n_keyframes 3 native_h native_w"] = (
-                decoder.get_frames_at(decoder_indices).data.detach().to(device="cpu")
-            )
-            rectified_frames: list[np.ndarray] = []
-            for decoded_rgb_chw in decoded_n3hw:
-                decoded_rgb_hwc: UInt8[np.ndarray, "native_h native_w 3"] = rearrange(
-                    decoded_rgb_chw.numpy(), "c h w -> h w c"
-                )
-                rectified_rgb_hwc: UInt8[np.ndarray, "360 640 3"] = self.rectifiers[
-                    camera_index
-                ].rectify(decoded_rgb_hwc)
-                rectified_frames.append(rearrange(rectified_rgb_hwc, "h w c -> c h w").copy())
-            rectified_n3hw: UInt8[np.ndarray, "n_keyframes 3 360 640"] = np.stack(
-                rectified_frames
-            )
-            rectified_by_camera.append(torch.from_numpy(rectified_n3hw))
+        keyframe_count: int = len(self._times_ns)
+        for chunk_start in range(0, keyframe_count, DECODE_CHUNK_SIZE):
+            chunk_end: int = min(chunk_start + DECODE_CHUNK_SIZE, keyframe_count)
+            rectified_by_camera: list[
+                UInt8[torch.Tensor, "chunk n_channels=3 rectified_h rectified_w"]
+            ] = []
+            for camera_index, stream in enumerate(self.relay_streams):
+                decoder = stream.decoder
+                if decoder is None:
+                    raise RuntimeError(
+                        "catalog decoder was released before keyframe decoding"
+                    )
+                decoder_indices: list[int] = [
+                    int(index)
+                    for index in self._stream_indices[camera_index][chunk_start:chunk_end]
+                ]
+                decoded_n3hw: UInt8[
+                    torch.Tensor, "chunk n_channels=3 native_h native_w"
+                ] = decoder.get_frames_at(decoder_indices).data.detach().to(device="cpu")
+                rectified_frames: list[np.ndarray] = []
+                for decoded_rgb_chw in decoded_n3hw:
+                    decoded_rgb_hwc: UInt8[
+                        np.ndarray, "native_h native_w n_channels=3"
+                    ] = rearrange(decoded_rgb_chw.numpy(), "c h w -> h w c")
+                    rectified_rgb_hwc: UInt8[
+                        np.ndarray, "rectified_h rectified_w n_channels=3"
+                    ] = self.rectifiers[camera_index].rectify(decoded_rgb_hwc)
+                    rectified_frames.append(
+                        rearrange(rectified_rgb_hwc, "h w c -> c h w").copy()
+                    )
+                rectified_n3hw: UInt8[
+                    np.ndarray, "chunk n_channels=3 rectified_h rectified_w"
+                ] = np.stack(rectified_frames)
+                rectified_by_camera.append(torch.from_numpy(rectified_n3hw))
 
-        for keyframe_index, timestamp_ns in enumerate(self._times_ns):
-            images_rgb_n3hw: UInt8[torch.Tensor, "n_cams 3 360 640"] = torch.stack(
-                [frames[keyframe_index] for frames in rectified_by_camera]
-            )
-            yield CatalogKeyframe(
-                timestamp_ns=int(timestamp_ns),
-                images_rgb=images_rgb_n3hw,
-                world_from_rig=self._world_from_rig_n44[keyframe_index].copy(),
-            )
+            for chunk_index, keyframe_index in enumerate(
+                range(chunk_start, chunk_end)
+            ):
+                images_rgb_n3hw: UInt8[
+                    torch.Tensor,
+                    "n_cams n_channels=3 rectified_h rectified_w",
+                ] = torch.stack(
+                    [frames[chunk_index] for frames in rectified_by_camera]
+                )
+                yield CatalogKeyframe(
+                    timestamp_ns=int(self._times_ns[keyframe_index]),
+                    images_rgb=images_rgb_n3hw,
+                    world_from_rig=self._world_from_rig_n44[keyframe_index].copy(),
+                )
 
 
 class RobocapSegment:
@@ -434,27 +450,33 @@ class RobocapSegment:
         self,
         *,
         catalog_url: str,
-        dataset_id: str,
+        dataset_name: str = "robocap",
+        dataset_id: str | None = None,
         segment_id: str,
         camera_ids: tuple[int, ...] = CAMERA_IDS,
         decoder: DecoderDevice = "cuda",
         fps: int = 30,
     ) -> None:
         self.catalog_url: str = catalog_url
-        self.dataset_id: str = dataset_id
+        self.dataset_name: str = dataset_name
+        self.dataset_id: str | None = dataset_id
         self.segment_id: str = segment_id
         self.camera_ids: tuple[int, ...] = camera_ids
         self.decoder: DecoderDevice = decoder
         self.fps: int = fps
         self.client: catalog.CatalogClient = catalog.CatalogClient(catalog_url)
-        self.dataset: Any = self.client.get_dataset(id=dataset_id)
+        self.dataset: Any = (
+            self.client.get_dataset(id=dataset_id)
+            if dataset_id is not None
+            else self.client.get_dataset(name=dataset_name)
+        )
         self.rig_calibration: RigCalibration = self._read_calibrations()
 
-        calibration_rectifiers: tuple[FisheyeRectifier, ...] = tuple(
+        self.rectifiers: tuple[FisheyeRectifier, ...] = tuple(
             FisheyeRectifier(camera) for camera in self.rig_calibration.cameras
         )
         self.rectified_cameras: tuple[PinholeParameters, ...] = tuple(
-            rectifier.virtual_camera for rectifier in calibration_rectifiers
+            rectifier.virtual_camera for rectifier in self.rectifiers
         )
         virtual_intrinsics_n4: Float32[np.ndarray, "n_cams 4"] = np.asarray(
             [

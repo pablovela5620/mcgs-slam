@@ -167,7 +167,8 @@ virtual pinholes (640×360) → MoGe-2 depth + normals → Gaussian mapper in me
 
 ```bash
 pixi run python infer_catalog.py --start 0 --end 10 --output output/robocap --refine-iters 2000
-# --catalog-url / --dataset-id / --segment-id select the segment (defaults: robocap s00000021)
+# --catalog-url / --dataset-name / --segment-id select the segment (defaults: robocap s00000021)
+# --dataset-id optionally overrides the dataset-name lookup with an exact UUID
 # --kf-dist 0.3 / --kf-angle 15 : new keyframe after that much Basalt motion
 # --decoder cpu                 : torchcodec on the CPU instead of NVDEC
 ```

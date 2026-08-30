@@ -11,7 +11,7 @@ pytestmark = pytest.mark.integration
 def test_live_segment_decodes_one_rectified_frame_per_camera() -> None:
     segment = RobocapSegment(
         catalog_url="rerun+http://pablo-dl-server.ilish-ruler.ts.net:51235",
-        dataset_id="18CFB19109CFDB071d88fb8b48ef65e9",
+        dataset_name="robocap",
         segment_id="robocap__f408193e6447b3b0__s00000021",
         decoder="cuda",
     )

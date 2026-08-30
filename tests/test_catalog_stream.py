@@ -1,9 +1,11 @@
 """Hermetic contracts for the robocap catalog stream."""
 
 from dataclasses import fields
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 from simplecv.camera_parameters import (
     Extrinsics,
     Fisheye62Parameters,
@@ -11,10 +13,12 @@ from simplecv.camera_parameters import (
     KannalaBrandtDistortion,
     PinholeParameters,
 )
-from simplecv.rig import CameraSensor
+from simplecv.rig import CameraSensor, RigCalibration
 
+import catalog_stream
 from catalog_stream import (
     CatalogKeyframe,
+    CatalogWindow,
     FisheyeRectifier,
     KeyframeSelector,
     RobocapSegment,
@@ -188,6 +192,137 @@ def test_catalog_keyframe_contains_only_dynamic_rig_frame_data() -> None:
 def test_catalog_segment_requires_endpoint_dataset_and_segment() -> None:
     with pytest.raises(TypeError):
         RobocapSegment()  # type: ignore[call-arg]
+
+
+def _catalog_segment_with_stubbed_io(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dataset_id: str | None = None,
+) -> tuple[RobocapSegment, list[tuple[str | None, str | None]]]:
+    """Build a segment at the public catalog boundary without live I/O."""
+    dataset_requests: list[tuple[str | None, str | None]] = []
+
+    class StubCatalogClient:
+        def __init__(self, url: str) -> None:
+            assert url == "rerun+http://catalog"
+
+        def get_dataset(
+            self,
+            name: str | None = None,
+            *,
+            id: str | None = None,
+        ) -> object:
+            dataset_requests.append((name, id))
+            return object()
+
+    camera: CameraSensor = _fisheye_camera(
+        np.array(
+            [[610.0, 0.0, 958.0], [0.0, 608.0, 541.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        ),
+        np.array([0.07, -0.03, 0.02, -0.006], dtype=np.float64),
+    )
+    rig_calibration = RigCalibration(cameras=[camera], reference_index=0)
+    monkeypatch.setattr(catalog_stream.catalog, "CatalogClient", StubCatalogClient)
+    monkeypatch.setattr(
+        RobocapSegment,
+        "_read_calibrations",
+        lambda self: rig_calibration,
+    )
+    monkeypatch.setattr(RobocapSegment, "_first_packet_ns", lambda self, paths: 0)
+    segment = RobocapSegment(
+        catalog_url="rerun+http://catalog",
+        dataset_id=dataset_id,
+        segment_id="segment",
+        decoder="cpu",
+    )
+    return segment, dataset_requests
+
+
+def test_catalog_segment_resolves_default_dataset_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segment, dataset_requests = _catalog_segment_with_stubbed_io(monkeypatch)
+
+    assert dataset_requests == [("robocap", None)]
+    assert segment.dataset_name == "robocap"
+
+
+def test_catalog_segment_allows_dataset_id_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, dataset_requests = _catalog_segment_with_stubbed_io(
+        monkeypatch,
+        dataset_id="dataset-id",
+    )
+
+    assert dataset_requests == [(None, "dataset-id")]
+
+
+def test_catalog_window_reuses_segment_rectifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segment, _ = _catalog_segment_with_stubbed_io(monkeypatch)
+    segment.cam00_frame0_ns = -1
+    stream = SimpleNamespace(
+        times_ns=np.array([0], dtype=np.int64),
+        decoder=object(),
+    )
+    monkeypatch.setattr(segment, "_read_video_window", lambda camera, start, end: stream)
+    monkeypatch.setattr(
+        segment,
+        "_read_poses",
+        lambda start, end: (
+            np.array([0], dtype=np.int64),
+            np.eye(4, dtype=np.float64)[None],
+        ),
+    )
+
+    window = segment.open_window(start_seconds=0.0, end_seconds=1.0)
+
+    assert window.rectifiers is segment.rectifiers
+
+
+def test_catalog_keyframes_decode_each_camera_in_bounded_chunks() -> None:
+    requested_batches: list[list[list[int]]] = [[] for _ in range(4)]
+
+    class StubDecoder:
+        def __init__(self, camera_index: int) -> None:
+            self.camera_index: int = camera_index
+
+        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
+            requested_batches[self.camera_index].append(indices)
+            values: torch.Tensor = torch.tensor(indices, dtype=torch.uint8)[:, None, None, None]
+            return SimpleNamespace(data=values.expand(-1, 3, 2, 2))
+
+    window: CatalogWindow = CatalogWindow.__new__(CatalogWindow)
+    window._closed = False
+    window.relay_streams = tuple(
+        SimpleNamespace(decoder=StubDecoder(camera_index))
+        for camera_index in range(4)
+    )
+    window.rectifiers = tuple(
+        SimpleNamespace(rectify=lambda image_rgb_hwc: image_rgb_hwc)
+        for _ in range(4)
+    )
+    window._stream_indices = tuple(
+        np.arange(17, dtype=np.int64) for _ in range(4)
+    )
+    window._times_ns = np.arange(17, dtype=np.int64)
+    window._world_from_rig_n44 = np.repeat(
+        np.eye(4, dtype=np.float64)[None],
+        17,
+        axis=0,
+    )
+
+    frames: list[CatalogKeyframe] = list(window.keyframes())
+
+    assert len(frames) == 17
+    assert [len(batch) for batch in requested_batches[0]] == [8, 8, 1]
+    assert all(
+        [len(batch) for batch in camera_batches] == [8, 8, 1]
+        for camera_batches in requested_batches
+    )
 
 
 def test_catalog_camera_paths_use_simplecv_zero_padding() -> None:

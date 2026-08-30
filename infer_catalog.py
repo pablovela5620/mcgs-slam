@@ -28,7 +28,7 @@ from utils.utils import load_config
 
 
 CATALOG_URL: str = "rerun+http://pablo-dl-server.ilish-ruler.ts.net:51235"
-DATASET_ID: str = "18CFB19109CFDB071d88fb8b48ef65e9"
+DATASET_NAME: str = "robocap"
 SEGMENT_ID: str = "robocap__f408193e6447b3b0__s00000021"
 MAP_SCALE: float = 1.0
 
@@ -39,8 +39,10 @@ class CatalogConfig:
 
     catalog_url: str = CATALOG_URL
     """Rerun catalog endpoint."""
-    dataset_id: str = DATASET_ID
-    """Robocap catalog dataset UUID."""
+    dataset_name: str = DATASET_NAME
+    """Robocap catalog dataset name."""
+    dataset_id: str | None = None
+    """Optional catalog dataset UUID override."""
     segment_id: str = SEGMENT_ID
     """Exact robocap segment identifier."""
     start: float = 0.0
@@ -83,6 +85,7 @@ def run(config: CatalogConfig) -> dict[str, float | int | str]:
     started: float = time.perf_counter()
     segment = RobocapSegment(
         catalog_url=config.catalog_url,
+        dataset_name=config.dataset_name,
         dataset_id=config.dataset_id,
         segment_id=config.segment_id,
         decoder=config.decoder,
