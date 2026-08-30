@@ -202,17 +202,17 @@ class FactorGraph:
         m = (self.ii_inac == ix) | (self.jj_inac == ix)
         self.ii_inac[self.ii_inac >= ix] -= 1
         self.jj_inac[self.jj_inac >= ix] -= 1
-
-        if torch.any(m):
-            self.ii_inac = self.ii_inac[~m]
-            self.jj_inac = self.jj_inac[~m]
-            self.target_inac = self.target_inac[:,~m]
-            self.weight_inac = self.weight_inac[:,~m]
+        m |= (self.ii_inac - self.jj_inac).abs() < self.MIN_TEMPORAL_GAP
+        self.ii_inac = self.ii_inac[~m]
+        self.jj_inac = self.jj_inac[~m]
+        self.target_inac = self.target_inac[:,~m]
+        self.weight_inac = self.weight_inac[:,~m]
 
         m = (self.ii == ix) | (self.jj == ix)
 
         self.ii[self.ii >= ix] -= 1
         self.jj[self.jj >= ix] -= 1
+        m |= (self.ii - self.jj).abs() < self.MIN_TEMPORAL_GAP
         self.rm_factors(m, store=False)
         self.eset = set(
             [(i.item(), j.item()) for i, j in zip(self.ii, self.jj)] +

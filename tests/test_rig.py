@@ -248,3 +248,33 @@ def test_add_factors_rejects_a_self_edge() -> None:
 
     with pytest.raises(AssertionError, match="self-edge reached FactorGraph.add_factors"):
         graph.add_factors(torch.tensor([2]), torch.tensor([2]))
+
+
+def test_removing_middle_keyframe_drops_newly_adjacent_active_and_inactive_edges() -> None:
+    graph: FactorGraph = _real_edge_graph(frame_count=5)
+    graph.index = 1
+    graph.ii = torch.tensor([0, 0], dtype=torch.long)
+    graph.jj = torch.tensor([2, 3], dtype=torch.long)
+    graph.age = torch.tensor([10, 20], dtype=torch.long)
+    graph.net = torch.tensor([[[10.0], [20.0]]])
+    graph.inp = torch.tensor([[[[10.0]], [[20.0]]]])
+    graph.target = torch.tensor([[[[[10.0, 10.0]]], [[[20.0, 20.0]]]]])
+    graph.weight = torch.tensor([[[[[1.0, 1.0]]], [[[2.0, 2.0]]]]])
+    graph.ii_inac = torch.tensor([2, 3], dtype=torch.long)
+    graph.jj_inac = torch.tensor([0, 0], dtype=torch.long)
+    graph.target_inac = torch.tensor([[[[[30.0, 30.0]]], [[[40.0, 40.0]]]]])
+    graph.weight_inac = torch.tensor([[[[[3.0, 3.0]]], [[[4.0, 4.0]]]]])
+    graph.eset = {(0, 2), (0, 3), (2, 0), (3, 0)}
+
+    graph.rm_keyframe(1)
+
+    assert (graph.ii.tolist(), graph.jj.tolist()) == ([0], [2])
+    assert graph.age.tolist() == [20]
+    assert graph.net.flatten().tolist() == [20.0]
+    assert graph.inp.flatten().tolist() == [20.0]
+    assert graph.target.flatten().tolist() == [20.0, 20.0]
+    assert graph.weight.flatten().tolist() == [2.0, 2.0]
+    assert (graph.ii_inac.tolist(), graph.jj_inac.tolist()) == ([2], [0])
+    assert graph.target_inac.flatten().tolist() == [40.0, 40.0]
+    assert graph.weight_inac.flatten().tolist() == [4.0, 4.0]
+    assert graph.eset == {(0, 2), (2, 0)}
