@@ -17,7 +17,7 @@ from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
 from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
-from camera_packet import CameraPacket, GlobalCameraPacket, pose_update_count
+from camera_packet import CameraPacket, GlobalCameraPacket
 try:
     from gaussian.gui import gui_utils, slam_gui
 except ImportError:  # GUI deps (glfw/OpenGL/imgviz) are optional; rerun is the default viewer
@@ -179,32 +179,64 @@ class GSBackEnd(mp.Process):
                     gtcolor=viewpoint.original_image,
                     gtdepth=viewpoint.depth.numpy()))
 
+    def _apply_global_corrections(self, packet: GlobalCameraPacket) -> None:
+        """Apply packet corrections to matched Gaussians in provenance order."""
+        pose_updates = packet["pose_updates"]
+        if pose_updates is None:
+            return
+        scale_updates = packet["scale_updates"]
+        if scale_updates is None:
+            raise ValueError("scale_updates are required when pose_updates are supplied")
+
+        view_ids: list[int] = [int(value) for value in packet["view_ids"].tolist()]
+        correction_rows: list[int] = [
+            int(value) for value in packet["pose_update_indices"].tolist()
+        ]
+        assert len(view_ids) == len(set(view_ids)), (
+            "each view id must have at most one correction row"
+        )
+        view_id_to_correction_row: dict[int, int] = dict(
+            zip(view_ids, correction_rows, strict=True)
+        )
+
+        gaussian_view_ids: list[int] = [
+            int(value) for value in self.gaussians.unique_kfIDs.tolist()
+        ]
+        matched_mask_cpu: torch.Tensor = torch.tensor(
+            [view_id in view_id_to_correction_row for view_id in gaussian_view_ids],
+            dtype=torch.bool,
+        )
+        if not torch.any(matched_mask_cpu):
+            return
+        matched_rows: list[int] = [
+            view_id_to_correction_row[view_id]
+            for view_id in gaussian_view_ids
+            if view_id in view_id_to_correction_row
+        ]
+
+        xyz = self.gaussians.get_xyz
+        device: torch.device = xyz.device
+        matched_mask = matched_mask_cpu.to(device=device)
+        pose_indices = torch.tensor(matched_rows, dtype=torch.long, device=device)
+        updates = SE3(pose_updates.data.to(device=device))[pose_indices]
+        updates_scale = scale_updates.to(device=device)[pose_indices]
+        self.gaussians._xyz[matched_mask] = (
+            updates * xyz[matched_mask]
+        ) / updates_scale
+
+        scale = self.gaussians.get_scaling[matched_mask] / updates_scale
+        self.gaussians._scaling[matched_mask] = (
+            self.gaussians.scaling_inverse_activation(scale)
+        )
+
+        rotation = SO3(self.gaussians.get_rotation[matched_mask])
+        corrected_rotation = SO3(updates.data[:, 3:]) * rotation
+        self.gaussians._rotation[matched_mask] = corrected_rotation.data
+
     def process_global_track_data(self, packet: GlobalCameraPacket):
         if packet["pose_updates"] is not None:
             with torch.no_grad():
-                view_ids = packet["view_ids"]
-                pose_updates = packet["pose_updates"]
-                scale_updates = packet["scale_updates"]
-                if scale_updates is None:
-                    raise ValueError("scale_updates are required when pose_updates are supplied")
-                packet_indices = (
-                    view_ids.unsqueeze(1) == self.gaussians.unique_kfIDs.unsqueeze(0)
-                ).nonzero()[:, 0]
-                pose_indices = packet_indices % pose_update_count(pose_updates)
-                updates = pose_updates.cuda()[pose_indices]
-                updates_scale = scale_updates.cuda()[pose_indices]
-                
-                xyz = self.gaussians.get_xyz
-                xyz = (updates * xyz) / updates_scale
-                self.gaussians._xyz[:] = xyz
-
-                scale = self.gaussians.get_scaling
-                scale = scale / updates_scale
-                self.gaussians._scaling[:] = self.gaussians.scaling_inverse_activation(scale)
- 
-                rot = SO3(self.gaussians.get_rotation)
-                rot = SO3(updates.data[:,3:]) * rot
-                self.gaussians._rotation[:] = rot.data
+                self._apply_global_corrections(packet)
 
         H, W = packet["images"].shape[-2:]
         w2c = SE3(packet["poses"]).matrix().cuda()

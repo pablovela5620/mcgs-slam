@@ -6,8 +6,10 @@ import lietorch
 import torch
 from jaxtyping import Float32, Int64, UInt8
 
+from prior_mask import mask_invalid_depth
 
-PoseUpdates: TypeAlias = Float32[torch.Tensor, "n 7"] | lietorch.SE3 | None
+
+PoseUpdateInput: TypeAlias = Float32[torch.Tensor, "n 7"] | lietorch.SE3 | None
 
 
 class CameraPacket(TypedDict):
@@ -34,16 +36,12 @@ class GlobalCameraPacket(TypedDict):
     depths: Float32[torch.Tensor, "n_views h w"]
     intrinsics: Float32[torch.Tensor, "n_views 4"]
     cam_indices: Int64[torch.Tensor, "n_views"]
-    pose_updates: PoseUpdates
+    pose_update_indices: Int64[torch.Tensor, "n_views"]
+    pose_updates: lietorch.SE3 | None
     scale_updates: Float32[torch.Tensor, "n_frames 1"] | None
 
 
 RigPacketBatch: TypeAlias = GlobalCameraPacket
-
-
-def pose_update_count(pose_updates: Float32[torch.Tensor, "n 7"] | lietorch.SE3) -> int:
-    """Return the leading batch size for tensor or lietorch pose updates."""
-    return int(pose_updates.data.shape[0])
 
 
 def build_camera_packet(
@@ -97,7 +95,10 @@ def build_camera_packet(
     depth_scaled_nhw: torch.Tensor = depth_metres_nhw.detach().to(
         device="cpu", dtype=torch.float32
     ) * map_scale
-    valid_nhw: torch.Tensor = normals_cpu_n3hw.norm(dim=1) > 0.5
+    masked_depth_nhw: torch.Tensor = mask_invalid_depth(
+        depth_scaled_nhw,
+        normals_cpu_n3hw,
+    )
 
     return {
         "frame_ids": frame_ids_n,
@@ -105,7 +106,7 @@ def build_camera_packet(
         "poses": poses_scaled_n7,
         "images": images_rgb_n3hw.detach().to(device="cpu", dtype=torch.uint8),
         "normals": normals_cpu_n3hw,
-        "depths": torch.where(valid_nhw, depth_scaled_nhw, torch.zeros_like(depth_scaled_nhw)),
+        "depths": masked_depth_nhw,
         "intrinsics": intrinsics_n4.detach().to(device="cpu", dtype=torch.float32),
         "cam_idx": cam_idx,
     }
@@ -114,7 +115,7 @@ def build_camera_packet(
 def merge_camera_packets(
     packets: list[CameraPacket],
     *,
-    pose_updates: PoseUpdates = None,
+    pose_updates: PoseUpdateInput = None,
     scale_updates: Float32[torch.Tensor, "n_frames 1"] | None = None,
 ) -> GlobalCameraPacket:
     """Merge per-camera packets and attach optional rig-pose corrections.
@@ -128,36 +129,62 @@ def merge_camera_packets(
         One typed batch with a tensor-valued ``cam_indices`` field.
 
     Raises:
-        ValueError: If no camera packets are supplied.
+        ValueError: If packets disagree on frame IDs or correction lengths.
     """
     if not packets:
         raise ValueError("at least one camera packet is required")
 
-    tensor_keys: tuple[str, ...] = (
-        "frame_ids",
-        "view_ids",
-        "poses",
-        "images",
-        "normals",
-        "depths",
-        "intrinsics",
-    )
-    merged: dict[str, object] = {
-        key: torch.cat([packet[key] for packet in packets], dim=0)  # type: ignore[literal-required]
-        for key in tensor_keys
-    }
-    merged["cam_indices"] = torch.cat(
+    reference_frame_ids_n: torch.Tensor = packets[0]["frame_ids"]
+    if any(
+        not torch.equal(packet["frame_ids"], reference_frame_ids_n)
+        for packet in packets[1:]
+    ):
+        raise ValueError("all camera packets must carry the same frame ids")
+
+    frame_count: int = len(reference_frame_ids_n)
+    normalized_pose_updates: lietorch.SE3 | None = None
+    if pose_updates is not None:
+        pose_data_n7: torch.Tensor = (
+            pose_updates.data if isinstance(pose_updates, lietorch.SE3) else pose_updates
+        )
+        if pose_data_n7.shape != (frame_count, 7):
+            raise ValueError(
+                f"pose_updates must have shape ({frame_count}, 7), got {tuple(pose_data_n7.shape)}"
+            )
+        normalized_pose_updates = lietorch.SE3(
+            pose_data_n7.detach().to(device="cpu", dtype=torch.float32)
+        )
+
+    normalized_scale_updates: torch.Tensor | None = None
+    if scale_updates is not None:
+        if scale_updates.shape != (frame_count, 1):
+            raise ValueError(
+                f"scale_updates must have shape ({frame_count}, 1), got {tuple(scale_updates.shape)}"
+            )
+        normalized_scale_updates = scale_updates.detach().to(
+            device="cpu", dtype=torch.float32
+        )
+
+    cam_indices_n_views: torch.Tensor = torch.cat(
         [
             torch.full_like(packet["frame_ids"], packet["cam_idx"], dtype=torch.long)
             for packet in packets
         ]
     )
-    merged["pose_updates"] = (
-        pose_updates.to(device="cpu") if pose_updates is not None else None
-    )
-    merged["scale_updates"] = (
-        scale_updates.to(device="cpu", dtype=torch.float32)
-        if scale_updates is not None
-        else None
-    )
-    return merged  # type: ignore[return-value]
+    pose_update_indices_n_views: torch.Tensor = torch.arange(
+        frame_count, dtype=torch.long
+    ).repeat(len(packets))
+    merged: GlobalCameraPacket = {
+        "frame_ids": torch.cat([packet["frame_ids"] for packet in packets]),
+        "view_ids": torch.cat([packet["view_ids"] for packet in packets]),
+        "poses": torch.cat([packet["poses"] for packet in packets]),
+        "images": torch.cat([packet["images"] for packet in packets]),
+        "normals": torch.cat([packet["normals"] for packet in packets]),
+        "depths": torch.cat([packet["depths"] for packet in packets]),
+        "intrinsics": torch.cat([packet["intrinsics"] for packet in packets]),
+        "cam_indices": cam_indices_n_views,
+        "pose_update_indices": pose_update_indices_n_views,
+        "pose_updates": normalized_pose_updates,
+        "scale_updates": normalized_scale_updates,
+    }
+    return merged

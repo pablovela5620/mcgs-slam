@@ -4,13 +4,13 @@ import subprocess
 import sys
 
 import lietorch
+import pytest
 import torch
 
 from camera_packet import (
     CameraPacket,
     build_camera_packet,
     merge_camera_packets,
-    pose_update_count,
 )
 
 
@@ -125,11 +125,13 @@ def test_merge_camera_packets_uses_tensor_camera_indices_and_explicit_updates() 
     assert merged["frame_ids"].tolist() == [7, 8, 7, 8]
     assert merged["view_ids"].tolist() == [21, 24, 23, 26]
     assert merged["cam_indices"].tolist() == [0, 0, 2, 2]
+    assert merged["pose_update_indices"].tolist() == [0, 1, 0, 1]
+    assert isinstance(merged["pose_updates"], lietorch.SE3)
     assert torch.equal(merged["pose_updates"].data, pose_updates.data)
     assert torch.equal(merged["scale_updates"], scale_updates)
 
 
-def test_pose_update_count_accepts_tensor_and_lietorch_se3() -> None:
+def test_merge_camera_packets_normalizes_tensor_pose_updates() -> None:
     updates_n7 = torch.tensor(
         [
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
@@ -138,8 +140,21 @@ def test_pose_update_count_accepts_tensor_and_lietorch_se3() -> None:
         dtype=torch.float32,
     )
 
-    assert pose_update_count(updates_n7) == 2
-    assert pose_update_count(lietorch.SE3(updates_n7)) == 2
+    merged = merge_camera_packets(
+        [_packet([7, 8], cam_idx=0), _packet([7, 8], cam_idx=1)],
+        pose_updates=updates_n7,
+        scale_updates=torch.ones((2, 1), dtype=torch.float32),
+    )
+
+    assert isinstance(merged["pose_updates"], lietorch.SE3)
+    assert torch.equal(merged["pose_updates"].data, updates_n7)
+
+
+def test_merge_camera_packets_rejects_mismatched_frame_ids() -> None:
+    with pytest.raises(ValueError, match="same frame ids"):
+        merge_camera_packets(
+            [_packet([7, 8], cam_idx=0), _packet([7, 9], cam_idx=1)],
+        )
 
 
 def test_importing_catalog_entry_point_does_not_load_droid_backends() -> None:
